@@ -1,0 +1,31 @@
+<!-- templates/base.html -->
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{{ title }}</title>
+    <link rel="stylesheet" href="{{ request.url_for('static', path='styles.css') }}">
+</head>
+<body>
+<header class="topbar">
+    <div class="container topbar-inner">
+        <a class="brand" href="/documents">{{ title }}</a>
+        <nav class="topnav">
+            <a href="/documents">Bandeja</a>
+            <a href="/health" target="_blank" rel="noreferrer">Health</a>
+        </nav>
+    </div>
+</header>
+
+<main class="container page-shell">
+    {% if message %}
+        <div class="alert success">{{ message }}</div>
+    {% endif %}
+    {% block content %}{% endblock %}
+</main>
+
+<script src="{{ request.url_for('static', path='app.js') }}"></script>
+{% block scripts %}{% endblock %}
+</body>
+</html>

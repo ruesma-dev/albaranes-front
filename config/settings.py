@@ -1,0 +1,67 @@
+# config/settings.py
+from __future__ import annotations
+
+from pathlib import Path
+from urllib.parse import quote_plus
+
+from pydantic import Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+_ENV_FILE = Path(__file__).resolve().parents[1] / ".env"
+
+
+class Settings(BaseSettings):
+    pg_host: str = Field("localhost", alias="PG_HOST")
+    pg_port: int = Field(5432, alias="PG_PORT")
+    pg_db: str = Field("albaranes", alias="PG_DB")
+    pg_user: str = Field("postgres", alias="PG_USER")
+    pg_password: str = Field(..., alias="PG_PASSWORD")
+
+    pg_admin_db: str = Field("postgres", alias="PG_ADMIN_DB")
+    pg_admin_user: str = Field("postgres", alias="PG_ADMIN_USER")
+    pg_admin_password: str = Field(..., alias="PG_ADMIN_PASSWORD")
+    auto_create_database: bool = Field(True, alias="AUTO_CREATE_DATABASE")
+
+    graph_key: str | None = Field(None, alias="GRAPH_KEY")
+    sharepoint_drive_id: str | None = Field(None, alias="SHAREPOINT_DRIVE_ID")
+    graph_timeout_s: int = Field(60, alias="GRAPH_TIMEOUT_S")
+
+    api_host: str = Field("127.0.0.1", alias="API_HOST")
+    api_port: int = Field(8002, alias="API_PORT")
+    log_level: str = Field("INFO", alias="LOG_LEVEL")
+    log_dir: str = Field("logs", alias="LOG_DIR")
+    service_version: str = Field("1.0.0", alias="SERVICE_VERSION")
+    app_title: str = Field("Revisión de Albaranes IA", alias="APP_TITLE")
+    default_page_size: int = Field(25, alias="DEFAULT_PAGE_SIZE")
+    max_page_size: int = Field(100, alias="MAX_PAGE_SIZE")
+    default_reviewer: str | None = Field(None, alias="DEFAULT_REVIEWER")
+
+    model_config = SettingsConfigDict(
+        env_file=_ENV_FILE,
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
+
+    @property
+    def database_url(self) -> str:
+        user = quote_plus(self.pg_user)
+        password = quote_plus(self.pg_password)
+        database = quote_plus(self.pg_db)
+        return (
+            f"postgresql+psycopg://{user}:{password}"
+            f"@{self.pg_host}:{self.pg_port}/{database}"
+        )
+
+    @property
+    def admin_database_url(self) -> str:
+        user = quote_plus(self.pg_admin_user)
+        password = quote_plus(self.pg_admin_password)
+        database = quote_plus(self.pg_admin_db)
+        return (
+            f"postgresql+psycopg://{user}:{password}"
+            f"@{self.pg_host}:{self.pg_port}/{database}"
+        )
+
+    @property
+    def preview_enabled(self) -> bool:
+        return bool(self.graph_key and self.sharepoint_drive_id)

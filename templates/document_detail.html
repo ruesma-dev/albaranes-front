@@ -1,0 +1,165 @@
+<!-- templates/document_detail.html -->
+{% extends "base.html" %}
+{% block content %}
+<section class="page-header detail-header">
+    <div>
+        <h1>Revisión de documento</h1>
+        <p class="muted">Edita la extracción final y aprueba cuando quede validada.</p>
+    </div>
+    <div class="header-actions">
+        <a href="/documents" class="btn secondary">← Volver</a>
+        {% if document.document_url %}
+            <a href="{{ document.document_url }}" target="_blank" rel="noreferrer" class="btn secondary">Abrir en SharePoint</a>
+        {% endif %}
+    </div>
+</section>
+
+<section class="split-layout">
+    <aside class="panel viewer-panel">
+        <div class="panel-header">
+            <h2>Documento</h2>
+            <div class="meta-inline">
+                <span class="status-pill {{ 'approved' if document.approved else 'pending' }}">
+                    {{ 'Aprobado' if document.approved else 'Pendiente' }}
+                </span>
+                {% if document.confidence_pct_calc is not none %}
+                    <span class="confidence-badge {{ 'low' if document.confidence_pct_calc < 80 else 'ok' }}">
+                        {{ '%.1f'|format(document.confidence_pct_calc) }}%
+                    </span>
+                {% endif %}
+            </div>
+        </div>
+        {% if preview_enabled %}
+            <iframe class="document-frame" src="{{ document_preview_url }}#zoom=page-width"></iframe>
+        {% elif document.document_url %}
+            <div class="empty-state">
+                La vista previa embebida no está configurada. Usa el botón “Abrir en SharePoint”.
+            </div>
+        {% else %}
+            <div class="empty-state">No hay documento disponible para vista previa.</div>
+        {% endif %}
+        <div class="viewer-meta">
+            <div><strong>Archivo:</strong> {{ document.source_filename }}</div>
+            <div><strong>ID documento:</strong> {{ document.source_document_id or '—' }}</div>
+            <div><strong>Ref. almacenamiento:</strong> {{ document.document_storage_ref or '—' }}</div>
+            <div class="small muted">El visor se abre con zoom de ancho de página. El tamaño exacto del panel de miniaturas depende del visor PDF del navegador.</div>
+        </div>
+    </aside>
+
+    <section class="panel editor-panel">
+        <form id="document-form" class="editor-form">
+            <div class="panel-header">
+                <h2>Campos extraídos</h2>
+                <div class="header-actions">
+                    <button type="button" class="btn secondary" id="save-btn">Guardar</button>
+                    <button type="button" class="btn success" id="approve-btn">Guardar y aprobar</button>
+                </div>
+            </div>
+
+            <div class="form-grid two-columns">
+                <label>
+                    <span>Proveedor</span>
+                    <input type="text" id="proveedor_nombre" value="{{ document.proveedor_nombre or '' }}">
+                </label>
+                <label>
+                    <span>CIF proveedor</span>
+                    <input type="text" id="proveedor_cif" value="{{ document.proveedor_cif or '' }}">
+                </label>
+                <label>
+                    <span>Fecha</span>
+                    <input type="text" id="fecha" value="{{ document.fecha or '' }}">
+                </label>
+                <label>
+                    <span>Número albarán</span>
+                    <input type="text" id="numero_albaran" value="{{ document.numero_albaran or '' }}">
+                </label>
+                <label>
+                    <span>Forma de pago</span>
+                    <input type="text" id="forma_pago" value="{{ document.forma_pago or '' }}">
+                </label>
+                <label>
+                    <span>Código obra/proyecto</span>
+                    <input type="text" id="obra_codigo" value="{{ document.obra_codigo or '' }}">
+                </label>
+                <label class="full-width">
+                    <span>Nombre obra</span>
+                    <input type="text" id="obra_nombre" value="{{ document.obra_nombre or '' }}">
+                </label>
+                <label class="full-width">
+                    <span>Dirección obra</span>
+                    <input type="text" id="obra_direccion" value="{{ document.obra_direccion or '' }}">
+                </label>
+                <label class="full-width">
+                    <span>Notas de revisión</span>
+                    <textarea id="review_notes" rows="3">{{ document.review_notes or '' }}</textarea>
+                </label>
+                <label>
+                    <span>Revisor</span>
+                    <input type="text" id="approved_by" value="{{ document.approved_by or '' }}" placeholder="Nombre del revisor">
+                </label>
+            </div>
+
+            <div class="subsection-header">
+                <h3>Líneas</h3>
+                <button type="button" class="btn secondary small" id="add-line-btn">Añadir línea</button>
+            </div>
+            <div class="table-scroll">
+                <table class="table editable-table" id="lines-table">
+                    <thead>
+                    <tr>
+                        <th>#</th>
+                        <th>Código imputación</th>
+                        <th>Concepto</th>
+                        <th>Cantidad</th>
+                        <th>Precio</th>
+                        <th>Descuento</th>
+                        <th>Precio neto</th>
+                        <th>Código</th>
+                        <th></th>
+                    </tr>
+                    </thead>
+                    <tbody></tbody>
+                </table>
+            </div>
+        </form>
+
+        <section class="provider-section">
+            <div class="subsection-header">
+                <h3>Trazabilidad por proveedor</h3>
+            </div>
+            {% for item in document.provider_snapshots %}
+                <details class="provider-card">
+                    <summary>
+                        <strong>{{ item.provider_origin }}</strong>
+                        <span class="muted">{{ item.model_name }}</span>
+                    </summary>
+                    <div class="provider-grid">
+                        <div><strong>Proveedor:</strong> {{ item.proveedor_nombre or '—' }}</div>
+                        <div><strong>Fecha:</strong> {{ item.fecha or '—' }}</div>
+                        <div><strong>Número:</strong> {{ item.numero_albaran or '—' }}</div>
+                        <div><strong>Obra:</strong> {{ item.obra_codigo or '—' }}</div>
+                    </div>
+                    <div class="provider-json-grid">
+                        <div>
+                            <h4>JSON extraído</h4>
+                            <pre>{{ item.raw_extraction_json or '—' }}</pre>
+                        </div>
+                        <div>
+                            <h4>Respuesta IA</h4>
+                            <pre>{{ item.ia_output_json or '—' }}</pre>
+                        </div>
+                    </div>
+                </details>
+            {% endfor %}
+        </section>
+    </section>
+</section>
+
+<script id="document-data" data-document-id="{{ document.id }}" type="application/json">{{ document_json | safe }}</script>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    window.reviewDocumentId = {{ document.id | tojson }};
+</script>
+{% endblock %}
