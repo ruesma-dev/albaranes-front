@@ -6,6 +6,7 @@ from domain.models.review_models import (
     DocumentListFilters,
     MergeDocumentUpdatePayload,
     PaginatedDocuments,
+    VIEW_MODE_MERGE,
 )
 from infrastructure.database.review_repository import AlbaranReviewRepository
 
@@ -21,8 +22,16 @@ class ReviewService:
     def list_documents(self, filters: DocumentListFilters) -> PaginatedDocuments:
         return self._repository.list_documents(filters)
 
-    def get_document(self, document_id: str) -> DocumentDetailPayload | None:
-        return self._repository.get_document_detail(document_id)
+    def get_document(
+        self,
+        document_id: str,
+        *,
+        view_mode: str = VIEW_MODE_MERGE,
+    ) -> DocumentDetailPayload | None:
+        return self._repository.get_document_detail(
+            document_id,
+            view_mode=view_mode,
+        )
 
     def save_document(
         self,

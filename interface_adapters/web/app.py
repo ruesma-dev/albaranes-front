@@ -22,12 +22,28 @@ from domain.models.review_models import (
     HealthResponse,
     MergeDocumentUpdatePayload,
     SaveResponse,
+    VIEW_MODE_MERGE,
+    normalize_view_mode,
 )
 from infrastructure.database.review_repository import AlbaranReviewRepository
 from infrastructure.database.session_factory import SessionFactory
 from infrastructure.graph.token_provider import GraphTokenProvider
 
 logger = logging.getLogger(__name__)
+
+
+# Etiquetas legibles para mostrar en el desplegable de selector de vista.
+# Cualquier provider_origin no listado aquí se mostrará con su nombre en crudo.
+VIEW_LABELS = {
+    VIEW_MODE_MERGE: "Consolidado (merge)",
+    "openai": "OpenAI",
+    "gemini": "Gemini",
+    "claude": "Claude",
+}
+
+
+def _view_label(view_mode: str) -> str:
+    return VIEW_LABELS.get(view_mode, view_mode.replace("_", " ").title())
 
 
 def build_app(settings: Settings) -> FastAPI:
@@ -62,6 +78,7 @@ def build_app(settings: Settings) -> FastAPI:
         ensure_ascii=False,
         indent=2,
     )
+    templates.env.globals["view_label"] = _view_label
     app.mount(
         "/static",
         StaticFiles(directory=str(Path(__file__).resolve().parents[2] / "static")),
@@ -189,11 +206,17 @@ def build_app(settings: Settings) -> FastAPI:
     def document_detail(
         request: Request,
         document_id: str,
+        view: str = Query(default=VIEW_MODE_MERGE),
         message: str | None = Query(default=None),
     ) -> HTMLResponse:
-        document = review_service.get_document(document_id)
+        requested_view = normalize_view_mode(view)
+        document = review_service.get_document(
+            document_id,
+            view_mode=requested_view,
+        )
         if document is None:
             raise HTTPException(status_code=404, detail="Documento no encontrado")
+
         context = {
             "request": request,
             "title": settings.app_title,
@@ -202,6 +225,9 @@ def build_app(settings: Settings) -> FastAPI:
             "message": message,
             "preview_enabled": settings.preview_enabled,
             "document_preview_url": f"/documents/{document.id}/preview",
+            "current_view": document.view_mode,
+            "available_views": document.available_views,
+            "view_label": _view_label,
         }
         return templates.TemplateResponse(
             request=request,
@@ -211,6 +237,9 @@ def build_app(settings: Settings) -> FastAPI:
 
     @app.get("/documents/{document_id}/preview", response_class=Response)
     def document_preview(document_id: str) -> Response:
+        # El preview se sirve SIEMPRE desde la información del merge porque es
+        # ahí donde viven las referencias a SharePoint (todos los proveedores
+        # comparten el mismo PDF original).
         document = review_service.get_document(document_id)
         if document is None:
             raise HTTPException(status_code=404, detail="Documento no encontrado")
@@ -325,8 +354,14 @@ def build_app(settings: Settings) -> FastAPI:
             )
 
     @app.get("/api/documents/{document_id}", response_model=DocumentDetailPayload)
-    def document_detail_api(document_id: str) -> DocumentDetailPayload:
-        document = review_service.get_document(document_id)
+    def document_detail_api(
+        document_id: str,
+        view: str = Query(default=VIEW_MODE_MERGE),
+    ) -> DocumentDetailPayload:
+        document = review_service.get_document(
+            document_id,
+            view_mode=normalize_view_mode(view),
+        )
         if document is None:
             raise HTTPException(status_code=404, detail="Documento no encontrado")
         return document
@@ -336,6 +371,9 @@ def build_app(settings: Settings) -> FastAPI:
         document_id: str,
         payload: MergeDocumentUpdatePayload,
     ) -> SaveResponse:
+        # La escritura solo aplica al merge (fuente de verdad para la revisión).
+        # El front oculta los botones de guardar/aprobar en las vistas por
+        # proveedor; aquí simplemente se escribe contra el merge por id.
         try:
             detail = review_service.save_document(
                 document_id=document_id,

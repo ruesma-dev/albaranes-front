@@ -4,15 +4,45 @@
 <section class="page-header detail-header">
     <div>
         <h1>Revisión de documento</h1>
-        <p class="muted">Edita la extracción final y aprueba cuando quede validada.</p>
+        <p class="muted">
+            {% if document.is_editable %}
+                Edita la extracción final y aprueba cuando quede validada.
+            {% else %}
+                Vista de trazabilidad por proveedor. Solo lectura.
+            {% endif %}
+        </p>
     </div>
     <div class="header-actions">
+        <form method="get" class="view-switcher" action="/documents/{{ document.id }}">
+            <label>
+                <span class="muted small">Fuente de datos</span>
+                <select name="view" onchange="this.form.submit()">
+                    {% for option in available_views %}
+                        <option value="{{ option }}" {% if option == current_view %}selected{% endif %}>
+                            {{ view_label(option) }}
+                        </option>
+                    {% endfor %}
+                </select>
+            </label>
+            <noscript>
+                <button type="submit" class="btn secondary small">Cambiar vista</button>
+            </noscript>
+        </form>
         <a href="/documents" class="btn secondary">← Volver</a>
         {% if document.document_url %}
             <a href="{{ document.document_url }}" target="_blank" rel="noreferrer" class="btn secondary">Abrir en SharePoint</a>
         {% endif %}
     </div>
 </section>
+
+{% if not document.is_editable %}
+    <div class="alert warning">
+        Mostrando la extracción cruda de <strong>{{ view_label(document.view_mode) }}</strong>
+        {% if document.model_name %} (modelo <code>{{ document.model_name }}</code>){% endif %}.
+        Esta vista es de trazabilidad, solo lectura. Para editar o aprobar, cambia a
+        <strong>{{ view_label('merge') }}</strong>.
+    </div>
+{% endif %}
 
 <section class="split-layout">
     <aside class="panel viewer-panel">
@@ -42,69 +72,118 @@
             <div><strong>Archivo:</strong> {{ document.source_filename }}</div>
             <div><strong>ID documento:</strong> {{ document.source_document_id or '—' }}</div>
             <div><strong>Ref. almacenamiento:</strong> {{ document.document_storage_ref or '—' }}</div>
+            {% if document.provider_document_id %}
+                <div><strong>ID registro {{ view_label(document.view_mode) }}:</strong> <code>{{ document.provider_document_id }}</code></div>
+            {% endif %}
             <div class="small muted">El visor se abre con zoom de ancho de página. El tamaño exacto del panel de miniaturas depende del visor PDF del navegador.</div>
         </div>
     </aside>
 
     <section class="panel editor-panel">
-        <form id="document-form" class="editor-form">
-            <div class="panel-header">
-                <h2>Campos extraídos</h2>
-                <div class="header-actions">
-                    <button type="button" class="btn secondary" id="save-btn">Guardar</button>
-                    <button type="button" class="btn success" id="approve-btn">Guardar y aprobar</button>
+        {% if document.is_editable %}
+            {# ===================================================== #}
+            {# VISTA MERGE: formulario editable, lineas vía app.js   #}
+            {# ===================================================== #}
+            <form id="document-form" class="editor-form">
+                <div class="panel-header">
+                    <h2>Campos extraídos · {{ view_label(document.view_mode) }}</h2>
+                    <div class="header-actions">
+                        <button type="button" class="btn secondary" id="save-btn">Guardar</button>
+                        <button type="button" class="btn success" id="approve-btn">Guardar y aprobar</button>
+                    </div>
                 </div>
+
+                <div class="form-grid two-columns">
+                    <label>
+                        <span>Proveedor</span>
+                        <input type="text" id="proveedor_nombre" value="{{ document.proveedor_nombre or '' }}">
+                    </label>
+                    <label>
+                        <span>CIF proveedor</span>
+                        <input type="text" id="proveedor_cif" value="{{ document.proveedor_cif or '' }}">
+                    </label>
+                    <label>
+                        <span>Fecha</span>
+                        <input type="text" id="fecha" value="{{ document.fecha or '' }}">
+                    </label>
+                    <label>
+                        <span>Número albarán</span>
+                        <input type="text" id="numero_albaran" value="{{ document.numero_albaran or '' }}">
+                    </label>
+                    <label>
+                        <span>Forma de pago</span>
+                        <input type="text" id="forma_pago" value="{{ document.forma_pago or '' }}">
+                    </label>
+                    <label>
+                        <span>Código obra/proyecto</span>
+                        <input type="text" id="obra_codigo" value="{{ document.obra_codigo or '' }}">
+                    </label>
+                    <label class="full-width">
+                        <span>Nombre obra</span>
+                        <input type="text" id="obra_nombre" value="{{ document.obra_nombre or '' }}">
+                    </label>
+                    <label class="full-width">
+                        <span>Dirección obra</span>
+                        <input type="text" id="obra_direccion" value="{{ document.obra_direccion or '' }}">
+                    </label>
+                    <label class="full-width">
+                        <span>Notas de revisión</span>
+                        <textarea id="review_notes" rows="3">{{ document.review_notes or '' }}</textarea>
+                    </label>
+                    <label>
+                        <span>Revisor</span>
+                        <input type="text" id="approved_by" value="{{ document.approved_by or '' }}" placeholder="Nombre del revisor">
+                    </label>
+                </div>
+
+                <div class="subsection-header">
+                    <h3>Líneas</h3>
+                    <button type="button" class="btn secondary small" id="add-line-btn">Añadir línea</button>
+                </div>
+                <div class="table-scroll">
+                    <table class="table editable-table" id="lines-table">
+                        <thead>
+                        <tr>
+                            <th>#</th>
+                            <th>Código imputación</th>
+                            <th>Concepto</th>
+                            <th>Cantidad</th>
+                            <th>Precio</th>
+                            <th>Descuento</th>
+                            <th>Precio neto</th>
+                            <th>Código</th>
+                            <th></th>
+                        </tr>
+                        </thead>
+                        <tbody></tbody>
+                    </table>
+                </div>
+            </form>
+        {% else %}
+            {# ===================================================== #}
+            {# VISTA POR PROVEEDOR: solo lectura, render Jinja puro  #}
+            {# ===================================================== #}
+            <div class="panel-header">
+                <h2>Campos extraídos · {{ view_label(document.view_mode) }}</h2>
+                <span class="status-pill pending">Solo lectura</span>
             </div>
 
-            <div class="form-grid two-columns">
-                <label>
-                    <span>Proveedor</span>
-                    <input type="text" id="proveedor_nombre" value="{{ document.proveedor_nombre or '' }}">
-                </label>
-                <label>
-                    <span>CIF proveedor</span>
-                    <input type="text" id="proveedor_cif" value="{{ document.proveedor_cif or '' }}">
-                </label>
-                <label>
-                    <span>Fecha</span>
-                    <input type="text" id="fecha" value="{{ document.fecha or '' }}">
-                </label>
-                <label>
-                    <span>Número albarán</span>
-                    <input type="text" id="numero_albaran" value="{{ document.numero_albaran or '' }}">
-                </label>
-                <label>
-                    <span>Forma de pago</span>
-                    <input type="text" id="forma_pago" value="{{ document.forma_pago or '' }}">
-                </label>
-                <label>
-                    <span>Código obra/proyecto</span>
-                    <input type="text" id="obra_codigo" value="{{ document.obra_codigo or '' }}">
-                </label>
-                <label class="full-width">
-                    <span>Nombre obra</span>
-                    <input type="text" id="obra_nombre" value="{{ document.obra_nombre or '' }}">
-                </label>
-                <label class="full-width">
-                    <span>Dirección obra</span>
-                    <input type="text" id="obra_direccion" value="{{ document.obra_direccion or '' }}">
-                </label>
-                <label class="full-width">
-                    <span>Notas de revisión</span>
-                    <textarea id="review_notes" rows="3">{{ document.review_notes or '' }}</textarea>
-                </label>
-                <label>
-                    <span>Revisor</span>
-                    <input type="text" id="approved_by" value="{{ document.approved_by or '' }}" placeholder="Nombre del revisor">
-                </label>
-            </div>
+            <dl class="readonly-grid two-columns">
+                <div><dt>Proveedor</dt><dd>{{ document.proveedor_nombre or '—' }}</dd></div>
+                <div><dt>CIF proveedor</dt><dd class="muted small">No disponible en {{ view_label(document.view_mode) }}</dd></div>
+                <div><dt>Fecha</dt><dd>{{ document.fecha or '—' }}</dd></div>
+                <div><dt>Número albarán</dt><dd>{{ document.numero_albaran or '—' }}</dd></div>
+                <div><dt>Forma de pago</dt><dd class="muted small">No disponible en {{ view_label(document.view_mode) }}</dd></div>
+                <div><dt>Código obra/proyecto</dt><dd>{{ document.obra_codigo or '—' }}</dd></div>
+                <div class="full-width"><dt>Nombre obra</dt><dd class="muted small">No disponible en {{ view_label(document.view_mode) }} (consúltese en JSON)</dd></div>
+                <div class="full-width"><dt>Dirección obra</dt><dd class="muted small">No disponible en {{ view_label(document.view_mode) }} (consúltese en JSON)</dd></div>
+            </dl>
 
             <div class="subsection-header">
-                <h3>Líneas</h3>
-                <button type="button" class="btn secondary small" id="add-line-btn">Añadir línea</button>
+                <h3>Líneas · {{ view_label(document.view_mode) }} ({{ document.lines|length }})</h3>
             </div>
             <div class="table-scroll">
-                <table class="table editable-table" id="lines-table">
+                <table class="table">
                     <thead>
                     <tr>
                         <th>#</th>
@@ -115,13 +194,53 @@
                         <th>Descuento</th>
                         <th>Precio neto</th>
                         <th>Código</th>
-                        <th></th>
+                        <th>Confianza</th>
                     </tr>
                     </thead>
-                    <tbody></tbody>
+                    <tbody>
+                    {% for line in document.lines %}
+                        <tr>
+                            <td>{{ loop.index }}</td>
+                            <td>{{ line.codigo_imputacion or '—' }}</td>
+                            <td>{{ line.concepto or '—' }}</td>
+                            <td>{{ line.cantidad if line.cantidad is not none else '—' }}</td>
+                            <td>{{ line.precio if line.precio is not none else '—' }}</td>
+                            <td>{{ line.descuento if line.descuento is not none else '—' }}</td>
+                            <td>{{ line.precio_neto if line.precio_neto is not none else '—' }}</td>
+                            <td>{{ line.codigo or '—' }}</td>
+                            <td>
+                                {% if line.confianza_pct is not none %}
+                                    {{ '%.1f'|format(line.confianza_pct) }}%
+                                {% else %}
+                                    —
+                                {% endif %}
+                            </td>
+                        </tr>
+                    {% else %}
+                        <tr><td colspan="9" class="empty-cell">Sin líneas para este proveedor.</td></tr>
+                    {% endfor %}
+                    </tbody>
                 </table>
             </div>
-        </form>
+
+            {% if document.raw_extraction_json %}
+                <details class="provider-card" style="margin-top: 20px;" open>
+                    <summary><strong>Extracción en crudo (JSON)</strong></summary>
+                    <div class="provider-json-grid">
+                        <div>
+                            <h4>raw_extraction_json</h4>
+                            <pre>{{ document.raw_extraction_json }}</pre>
+                        </div>
+                        {% if document.ia_output_json %}
+                            <div>
+                                <h4>ia_output_json</h4>
+                                <pre>{{ document.ia_output_json }}</pre>
+                            </div>
+                        {% endif %}
+                    </div>
+                </details>
+            {% endif %}
+        {% endif %}
 
         <section class="provider-section">
             <div class="subsection-header">
@@ -155,11 +274,17 @@
     </section>
 </section>
 
-<script id="document-data" data-document-id="{{ document.id }}" type="application/json">{{ document_json | safe }}</script>
+{% if document.is_editable %}
+    {# app.js sólo renderiza la tabla editable si encuentra este <script>. #}
+    {# En vista por proveedor NO lo emitimos, así app.js sale sin hacer nada. #}
+    <script id="document-data" data-document-id="{{ document.id }}" type="application/json">{{ document_json | safe }}</script>
+{% endif %}
 {% endblock %}
 
 {% block scripts %}
-<script>
-    window.reviewDocumentId = {{ document.id | tojson }};
-</script>
+{% if document.is_editable %}
+    <script>
+        window.reviewDocumentId = {{ document.id | tojson }};
+    </script>
+{% endif %}
 {% endblock %}

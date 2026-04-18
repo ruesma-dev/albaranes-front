@@ -10,17 +10,22 @@ from sqlalchemy import delete, func, inspect, nullslast, or_, select, text
 from sqlalchemy.orm import Session
 
 from domain.models.review_models import (
+    ALLOWED_VIEW_MODES,
     DocumentDetailPayload,
     DocumentListFilters,
     DocumentListItem,
+    KNOWN_PROVIDER_VIEWS,
     MergeDocumentUpdatePayload,
     MergeLinePayload,
     PaginatedDocuments,
     ProviderSnapshot,
+    VIEW_MODE_MERGE,
+    normalize_view_mode,
 )
 from infrastructure.database.orm_models import (
     AlbaranDocumentBaseOrm,
     AlbaranDocumentMergeOrm,
+    AlbaranLineBaseOrm,
     AlbaranLineMergeOrm,
 )
 from infrastructure.database.session_factory import SessionFactory
@@ -170,64 +175,210 @@ class AlbaranReviewRepository:
             review_required_count=int(review_required_count),
         )
 
-    def get_document_detail(self, document_id: str) -> DocumentDetailPayload | None:
+    def get_document_detail(
+        self,
+        document_id: str,
+        *,
+        view_mode: str = VIEW_MODE_MERGE,
+    ) -> DocumentDetailPayload | None:
+        """Carga el detalle del documento según el modo de vista solicitado.
+
+        Estrategia:
+          - El ``document_id`` en la URL es SIEMPRE el id del merge
+            (mantenemos URL estable y preview SharePoint operativo).
+          - Siempre cargamos el merge para obtener ``source_sha256`` y metadatos
+            de almacenamiento (SharePoint).
+          - Derivamos ``available_views`` a partir de los ``provider_origin``
+            presentes en ``albaran_documents`` para ese ``source_sha256``.
+          - Si ``view_mode == 'merge'`` usamos las tablas _merge (editable).
+          - Si ``view_mode`` es un proveedor (openai/gemini/claude) cargamos
+            desde ``albaran_documents`` + ``albaran_lines`` filtrado por
+            provider_origin (solo lectura).
+        """
         self.initialize()
         if not self._tables_ready():
             return None
 
+        normalized_view = normalize_view_mode(view_mode)
+
         with self._session_factory.create_session() as session:
-            document = session.get(AlbaranDocumentMergeOrm, document_id)
-            if document is None:
+            merge_doc = session.get(AlbaranDocumentMergeOrm, document_id)
+            if merge_doc is None:
                 return None
-            _ = document.lines
-            provider_snapshots = session.scalars(
+            _ = merge_doc.lines  # eager-load dentro de la sesión
+
+            provider_docs = session.scalars(
                 select(AlbaranDocumentBaseOrm)
-                .where(AlbaranDocumentBaseOrm.source_sha256 == document.source_sha256)
+                .where(AlbaranDocumentBaseOrm.source_sha256 == merge_doc.source_sha256)
                 .order_by(AlbaranDocumentBaseOrm.created_at_utc.asc())
             ).all()
 
-            return DocumentDetailPayload(
-                id=document.id,
-                source_document_id=document.source_document_id,
-                document_storage_ref=document.document_storage_ref,
-                source_filename=document.source_filename,
-                provider_origin=document.provider_origin,
-                model_name=document.model_name,
-                proveedor_nombre=document.proveedor_nombre,
-                proveedor_cif=document.proveedor_cif,
-                fecha=document.fecha,
-                numero_albaran=document.numero_albaran,
-                forma_pago=document.forma_pago,
-                obra_codigo=document.obra_codigo,
-                obra_nombre=document.obra_nombre,
-                obra_direccion=document.obra_direccion,
-                document_url=self._document_url(document),
-                confidence_pct_calc=document.confidence_pct_calc,
-                review_required=document.review_required,
-                review_reasons_json=document.review_reasons_json,
-                comparison_summary_json=document.comparison_summary_json,
-                approved=bool(document.approved),
-                approved_at_utc=document.approved_at_utc,
-                approved_by=document.approved_by,
-                reviewed_at_utc=document.reviewed_at_utc,
-                review_notes=document.review_notes,
-                created_at_utc=document.created_at_utc,
-                lines=[self._to_line_payload(line) for line in document.lines],
-                provider_snapshots=[
-                    ProviderSnapshot(
-                        id=item.id,
-                        provider_origin=item.provider_origin,
-                        model_name=item.model_name,
-                        proveedor_nombre=item.proveedor_nombre,
-                        fecha=item.fecha,
-                        numero_albaran=item.numero_albaran,
-                        obra_codigo=item.obra_codigo,
-                        raw_extraction_json=item.raw_extraction_json,
-                        ia_output_json=item.ia_output_json,
-                    )
-                    for item in provider_snapshots
-                ],
+            # available_views = merge + proveedores encontrados en orden conocido
+            seen_providers = {doc.provider_origin for doc in provider_docs}
+            available_views: list[str] = [VIEW_MODE_MERGE]
+            for provider in KNOWN_PROVIDER_VIEWS:
+                if provider in seen_providers:
+                    available_views.append(provider)
+            # Incluir cualquier provider_origin no listado explícitamente
+            # para futuras ampliaciones (p.e. azure_di, google_di) sin tocar código.
+            for provider in sorted(seen_providers):
+                if provider not in available_views:
+                    available_views.append(provider)
+
+            # Si se pide una vista de proveedor sin datos, caer con seguridad a merge
+            if (
+                normalized_view != VIEW_MODE_MERGE
+                and normalized_view not in seen_providers
+            ):
+                normalized_view = VIEW_MODE_MERGE
+
+            provider_snapshots_payload = [
+                ProviderSnapshot(
+                    id=item.id,
+                    provider_origin=item.provider_origin,
+                    model_name=item.model_name,
+                    proveedor_nombre=item.proveedor_nombre,
+                    fecha=item.fecha,
+                    numero_albaran=item.numero_albaran,
+                    obra_codigo=item.obra_codigo,
+                    raw_extraction_json=item.raw_extraction_json,
+                    ia_output_json=item.ia_output_json,
+                )
+                for item in provider_docs
+            ]
+
+            if normalized_view == VIEW_MODE_MERGE:
+                return self._build_merge_detail(
+                    merge_doc=merge_doc,
+                    available_views=available_views,
+                    provider_snapshots=provider_snapshots_payload,
+                )
+
+            provider_doc = next(
+                (doc for doc in provider_docs if doc.provider_origin == normalized_view),
+                None,
             )
+            # Defensivo: si desaparece entre la comprobación y aquí, volver a merge.
+            if provider_doc is None:
+                return self._build_merge_detail(
+                    merge_doc=merge_doc,
+                    available_views=available_views,
+                    provider_snapshots=provider_snapshots_payload,
+                )
+
+            provider_lines = session.scalars(
+                select(AlbaranLineBaseOrm)
+                .where(AlbaranLineBaseOrm.document_id == provider_doc.id)
+                .order_by(AlbaranLineBaseOrm.line_index.asc())
+            ).all()
+
+            return self._build_provider_detail(
+                merge_doc=merge_doc,
+                provider_doc=provider_doc,
+                provider_lines=provider_lines,
+                available_views=available_views,
+                provider_snapshots=provider_snapshots_payload,
+                view_mode=normalized_view,
+            )
+
+    def _build_merge_detail(
+        self,
+        *,
+        merge_doc: AlbaranDocumentMergeOrm,
+        available_views: list[str],
+        provider_snapshots: list[ProviderSnapshot],
+    ) -> DocumentDetailPayload:
+        return DocumentDetailPayload(
+            id=merge_doc.id,
+            view_mode=VIEW_MODE_MERGE,
+            available_views=available_views,
+            is_editable=True,
+            provider_document_id=None,
+            source_document_id=merge_doc.source_document_id,
+            document_storage_ref=merge_doc.document_storage_ref,
+            source_filename=merge_doc.source_filename,
+            provider_origin=merge_doc.provider_origin,
+            model_name=merge_doc.model_name,
+            proveedor_nombre=merge_doc.proveedor_nombre,
+            proveedor_cif=merge_doc.proveedor_cif,
+            fecha=merge_doc.fecha,
+            numero_albaran=merge_doc.numero_albaran,
+            forma_pago=merge_doc.forma_pago,
+            obra_codigo=merge_doc.obra_codigo,
+            obra_nombre=merge_doc.obra_nombre,
+            obra_direccion=merge_doc.obra_direccion,
+            document_url=self._document_url(merge_doc),
+            confidence_pct_calc=merge_doc.confidence_pct_calc,
+            review_required=merge_doc.review_required,
+            review_reasons_json=merge_doc.review_reasons_json,
+            comparison_summary_json=merge_doc.comparison_summary_json,
+            raw_extraction_json=merge_doc.raw_extraction_json,
+            ia_output_json=None,
+            approved=bool(merge_doc.approved),
+            approved_at_utc=merge_doc.approved_at_utc,
+            approved_by=merge_doc.approved_by,
+            reviewed_at_utc=merge_doc.reviewed_at_utc,
+            review_notes=merge_doc.review_notes,
+            created_at_utc=merge_doc.created_at_utc,
+            lines=[self._merge_line_to_payload(line) for line in merge_doc.lines],
+            provider_snapshots=provider_snapshots,
+        )
+
+    def _build_provider_detail(
+        self,
+        *,
+        merge_doc: AlbaranDocumentMergeOrm,
+        provider_doc: AlbaranDocumentBaseOrm,
+        provider_lines: list[AlbaranLineBaseOrm],
+        available_views: list[str],
+        provider_snapshots: list[ProviderSnapshot],
+        view_mode: str,
+    ) -> DocumentDetailPayload:
+        """Payload de vista por proveedor (solo lectura).
+
+        Mantiene ``id`` = id del merge para que la URL / preview SharePoint
+        / navegación sigan funcionando. Los datos extraídos vienen del bloque
+        del proveedor: columnas tipadas en albaran_documents + líneas en
+        albaran_lines. Los campos no presentes en la tabla base (proveedor_cif,
+        forma_pago, obra_nombre, obra_direccion) quedan en None; la trazabilidad
+        completa está disponible en ``raw_extraction_json``.
+        """
+        return DocumentDetailPayload(
+            id=merge_doc.id,
+            view_mode=view_mode,
+            available_views=available_views,
+            is_editable=False,
+            provider_document_id=provider_doc.id,
+            source_document_id=provider_doc.source_document_id
+            or merge_doc.source_document_id,
+            document_storage_ref=merge_doc.document_storage_ref,
+            source_filename=provider_doc.source_filename or merge_doc.source_filename,
+            provider_origin=provider_doc.provider_origin,
+            model_name=provider_doc.model_name,
+            proveedor_nombre=provider_doc.proveedor_nombre,
+            proveedor_cif=None,
+            fecha=provider_doc.fecha,
+            numero_albaran=provider_doc.numero_albaran,
+            forma_pago=None,
+            obra_codigo=provider_doc.obra_codigo,
+            obra_nombre=None,
+            obra_direccion=None,
+            document_url=self._document_url(merge_doc),
+            confidence_pct_calc=None,
+            review_required=None,
+            review_reasons_json=None,
+            comparison_summary_json=None,
+            raw_extraction_json=provider_doc.raw_extraction_json,
+            ia_output_json=provider_doc.ia_output_json,
+            approved=bool(merge_doc.approved),
+            approved_at_utc=merge_doc.approved_at_utc,
+            approved_by=merge_doc.approved_by,
+            reviewed_at_utc=merge_doc.reviewed_at_utc,
+            review_notes=merge_doc.review_notes,
+            created_at_utc=provider_doc.created_at_utc,
+            lines=[self._base_line_to_payload(line) for line in provider_lines],
+            provider_snapshots=provider_snapshots,
+        )
 
     def update_document(
         self,
@@ -360,7 +511,7 @@ class AlbaranReviewRepository:
         )
 
     @staticmethod
-    def _to_line_payload(line: AlbaranLineMergeOrm) -> MergeLinePayload:
+    def _merge_line_to_payload(line: AlbaranLineMergeOrm) -> MergeLinePayload:
         return MergeLinePayload(
             id=line.id,
             line_index=line.line_index,
@@ -378,6 +529,33 @@ class AlbaranReviewRepository:
             line_match_score=line.line_match_score,
             comparison_status_json=line.comparison_status_json,
             field_scores_json=line.field_scores_json,
+        )
+
+    @staticmethod
+    def _base_line_to_payload(line: AlbaranLineBaseOrm) -> MergeLinePayload:
+        """Adapta una línea de ``albaran_lines`` al payload de MergeLinePayload.
+
+        Los campos de merge-only (confidence_pct_calc, line_match_score,
+        comparison_status_json, field_scores_json) quedan en ``None`` porque
+        son fruto del post-proceso y no existen en la tabla base.
+        """
+        return MergeLinePayload(
+            id=line.id,
+            line_index=line.line_index,
+            external_line_id=line.external_line_id,
+            cabecera_id=line.cabecera_id,
+            codigo=line.codigo,
+            cantidad=line.cantidad,
+            concepto=line.concepto,
+            precio=line.precio,
+            descuento=line.descuento,
+            precio_neto=line.precio_neto,
+            codigo_imputacion=line.codigo_imputacion,
+            confianza_pct=line.confianza_pct,
+            confidence_pct_calc=None,
+            line_match_score=None,
+            comparison_status_json=None,
+            field_scores_json=None,
         )
 
     @staticmethod

@@ -5,6 +5,13 @@ from typing import Any
 
 from pydantic import BaseModel, Field, field_validator
 
+VIEW_MODE_MERGE = "merge"
+# Mantener la lista de proveedores aceptados por defecto sincronizada con los
+# valores de provider_origin que emiten el servicio 2 y el servicio 3. Si se
+# añade un nuevo proveedor en esos servicios basta con añadirlo aquí.
+KNOWN_PROVIDER_VIEWS = ("openai", "gemini", "claude")
+ALLOWED_VIEW_MODES = (VIEW_MODE_MERGE, *KNOWN_PROVIDER_VIEWS)
+
 
 class DocumentListFilters(BaseModel):
     search: str | None = None
@@ -116,6 +123,10 @@ class MergeDocumentUpdatePayload(BaseModel):
 
 class DocumentDetailPayload(BaseModel):
     id: str
+    view_mode: str = Field(default=VIEW_MODE_MERGE)
+    available_views: list[str] = Field(default_factory=list)
+    is_editable: bool = True
+    provider_document_id: str | None = None
     source_document_id: str | None = None
     document_storage_ref: str | None = None
     source_filename: str
@@ -134,6 +145,8 @@ class DocumentDetailPayload(BaseModel):
     review_required: bool | None = None
     review_reasons_json: str | None = None
     comparison_summary_json: str | None = None
+    raw_extraction_json: str | None = None
+    ia_output_json: str | None = None
     approved: bool = False
     approved_at_utc: str | None = None
     approved_by: str | None = None
@@ -169,3 +182,24 @@ class HealthResponse(BaseModel):
     version: str
     tables_ready: bool
     details: dict[str, Any]
+
+
+def normalize_view_mode(value: str | None) -> str:
+    """Normaliza el parámetro ``view`` (merge / openai / gemini / claude / ...).
+
+    Sanitiza el input pero deja pasar cualquier ``provider_origin`` futuro
+    (p.e. ``azure_di``, ``google_di``). La validación real de "¿tenemos datos
+    para este proveedor?" vive en el repositorio, que comprueba contra los
+    ``provider_origin`` realmente presentes en ``albaran_documents`` y cae
+    con seguridad a ``merge`` si el proveedor no existe.
+    """
+    if not value:
+        return VIEW_MODE_MERGE
+    cleaned = str(value).strip().lower()
+    if not cleaned:
+        return VIEW_MODE_MERGE
+    # Permitimos solo [a-z0-9_] para evitar que cualquier cosa rara termine
+    # filtrándose hacia queries/URLs. Lo demás colapsa a merge.
+    if not all(ch.isalnum() or ch == "_" for ch in cleaned):
+        return VIEW_MODE_MERGE
+    return cleaned

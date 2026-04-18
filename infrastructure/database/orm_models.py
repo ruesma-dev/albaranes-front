@@ -104,3 +104,42 @@ class AlbaranDocumentBaseOrm(Base):
     raw_extraction_json: Mapped[str] = mapped_column(Text, nullable=False)
     ia_output_json: Mapped[str | None] = mapped_column(Text)
     created_at_utc: Mapped[str] = mapped_column(String(64), nullable=False)
+
+    # Relación de solo lectura hacia las líneas por proveedor.
+    # El servicio 4 NUNCA escribe sobre albaran_lines (es traza histórica
+    # producida por el servicio 3). Por eso viewonly=True.
+    lines: Mapped[list["AlbaranLineBaseOrm"]] = relationship(
+        order_by="AlbaranLineBaseOrm.line_index",
+        viewonly=True,
+    )
+
+
+class AlbaranLineBaseOrm(Base):
+    """Líneas de extracción por proveedor (tabla poblada por servicio 3).
+
+    Refleja la estructura de ``albaran_lines_merge`` pero referencia
+    ``albaran_documents`` en lugar de la tabla merge.
+    Se modela como solo lectura desde este servicio (portal de revisión).
+    """
+
+    __tablename__ = "albaran_lines"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    document_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("albaran_documents.id"),
+        nullable=False,
+        index=True,
+    )
+    provider_origin: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    line_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    external_line_id: Mapped[str | None] = mapped_column(String(64))
+    cabecera_id: Mapped[str | None] = mapped_column(String(64))
+    codigo: Mapped[str | None] = mapped_column(String(64))
+    cantidad: Mapped[float | None] = mapped_column(Float)
+    concepto: Mapped[str | None] = mapped_column(Text)
+    precio: Mapped[float | None] = mapped_column(Float)
+    descuento: Mapped[float | None] = mapped_column(Float)
+    precio_neto: Mapped[float | None] = mapped_column(Float)
+    codigo_imputacion: Mapped[str | None] = mapped_column(String(128))
+    confianza_pct: Mapped[float | None] = mapped_column(Float)
