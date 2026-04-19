@@ -6,9 +6,6 @@ from typing import Any
 from pydantic import BaseModel, Field, field_validator
 
 VIEW_MODE_MERGE = "merge"
-# Mantener la lista de proveedores aceptados por defecto sincronizada con los
-# valores de provider_origin que emiten el servicio 2 y el servicio 3. Si se
-# añade un nuevo proveedor en esos servicios basta con añadirlo aquí.
 KNOWN_PROVIDER_VIEWS = ("openai", "gemini", "claude")
 ALLOWED_VIEW_MODES = (VIEW_MODE_MERGE, *KNOWN_PROVIDER_VIEWS)
 
@@ -106,6 +103,28 @@ class MergeLinePayload(BaseModel):
     field_scores_json: str | None = None
 
 
+class ContratoPayload(BaseModel):
+    """Datos de un contrato asociado al (proveedor, obra) del documento.
+
+    Los tipos numéricos ``fecha_*`` vienen como INT YYYYMMDD (p.e.
+    20241122) — la capa de presentación los formatea a DD/MM/YYYY. Un
+    valor de ``0`` en vigencia significa "sin vigencia establecida".
+    """
+
+    id: int
+    codigo_contrato: str
+    nombre_contrato: str | None = None
+    fecha_alta_contrato: int | None = None
+    fecha_contrato: int | None = None
+    vigencia_desde: int | None = None
+    vigencia_hasta: int | None = None
+    importe_total: float | None = None
+    cif_proveedor: str | None = None
+    nombre_proveedor: str | None = None
+    codigo_obra: str | None = None
+    nombre_obra: str | None = None
+
+
 class MergeDocumentUpdatePayload(BaseModel):
     proveedor_nombre: str | None = None
     proveedor_cif: str | None = None
@@ -115,6 +134,9 @@ class MergeDocumentUpdatePayload(BaseModel):
     obra_codigo: str | None = None
     obra_nombre: str | None = None
     obra_direccion: str | None = None
+    # Contrato seleccionado por el usuario. None = sin seleccionar.
+    # Se valida contra los contratos cargados del documento al guardar.
+    selected_contrato_codigo: str | None = None
     review_notes: str | None = None
     approved: bool = False
     approved_by: str | None = None
@@ -155,6 +177,9 @@ class DocumentDetailPayload(BaseModel):
     created_at_utc: str
     lines: list[MergeLinePayload] = Field(default_factory=list)
     provider_snapshots: list[ProviderSnapshot] = Field(default_factory=list)
+    # Bloque de contratos enriquecidos por el servicio 3 desde la BBDD on-prem.
+    contratos: list[ContratoPayload] = Field(default_factory=list)
+    selected_contrato_codigo: str | None = None
 
 
 class PaginatedDocuments(BaseModel):
@@ -185,21 +210,11 @@ class HealthResponse(BaseModel):
 
 
 def normalize_view_mode(value: str | None) -> str:
-    """Normaliza el parámetro ``view`` (merge / openai / gemini / claude / ...).
-
-    Sanitiza el input pero deja pasar cualquier ``provider_origin`` futuro
-    (p.e. ``azure_di``, ``google_di``). La validación real de "¿tenemos datos
-    para este proveedor?" vive en el repositorio, que comprueba contra los
-    ``provider_origin`` realmente presentes en ``albaran_documents`` y cae
-    con seguridad a ``merge`` si el proveedor no existe.
-    """
     if not value:
         return VIEW_MODE_MERGE
     cleaned = str(value).strip().lower()
-    if not cleaned:
-        return VIEW_MODE_MERGE
-    # Permitimos solo [a-z0-9_] para evitar que cualquier cosa rara termine
-    # filtrándose hacia queries/URLs. Lo demás colapsa a merge.
-    if not all(ch.isalnum() or ch == "_" for ch in cleaned):
-        return VIEW_MODE_MERGE
-    return cleaned
+    if cleaned in ALLOWED_VIEW_MODES:
+        return cleaned
+    # Permitir cualquier provider_origin futuro (azure_di, etc.). La
+    # validación real contra datos reales la hace el repositorio.
+    return cleaned or VIEW_MODE_MERGE

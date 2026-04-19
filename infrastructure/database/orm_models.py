@@ -32,6 +32,12 @@ class AlbaranDocumentMergeOrm(Base):
     obra_nombre: Mapped[str | None] = mapped_column(String(255))
     obra_direccion: Mapped[str | None] = mapped_column(String(255))
 
+    # Código del contrato elegido para este albarán (ref. soft, no FK).
+    # NULL = sin elegir (0 contratos encontrados, o >1 sin elegir aún).
+    # Se auto-setea al único contrato si ``albaran_contratos_merge`` trae
+    # exactamente 1 fila para (cif, obra).
+    selected_contrato_codigo: Mapped[str | None] = mapped_column(String(64))
+
     sharepoint_relative_path: Mapped[str | None] = mapped_column(String(1024))
     sharepoint_web_url: Mapped[str | None] = mapped_column(String(1024))
     sharepoint_share_url: Mapped[str | None] = mapped_column(String(1024))
@@ -55,6 +61,15 @@ class AlbaranDocumentMergeOrm(Base):
         back_populates="document",
         cascade="all, delete-orphan",
         order_by="AlbaranLineMergeOrm.line_index",
+    )
+
+    # Contratos enriquecidos por el servicio 3 (read-only desde este
+    # servicio — el servicio 4 NO los escribe, solo los lee). El pipeline
+    # de enrichment del servicio 3 es quien los inserta/actualiza.
+    contratos: Mapped[list["AlbaranContratoMergeOrm"]] = relationship(
+        back_populates="document",
+        order_by="AlbaranContratoMergeOrm.codigo_contrato",
+        viewonly=True,
     )
 
 
@@ -88,6 +103,40 @@ class AlbaranLineMergeOrm(Base):
     document: Mapped[AlbaranDocumentMergeOrm] = relationship(back_populates="lines")
 
 
+class AlbaranContratoMergeOrm(Base):
+    """Contratos (proveedor × obra) asociados al merge doc.
+
+    Tabla creada por el servicio 3 (``scripts/diagnose_sigrid_contrato.py``
+    valida la query que la puebla). Relación 1:N con el merge doc. Mapeo
+    read-only desde aquí; si la tabla no existe todavía en BBDD, falla
+    solo al consultarla — no al construir el engine.
+    """
+
+    __tablename__ = "albaran_contratos_merge"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    document_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("albaran_documents_merge.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    codigo_contrato: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    nombre_contrato: Mapped[str | None] = mapped_column(Text)
+    fecha_alta_contrato: Mapped[int | None] = mapped_column(Integer)
+    fecha_contrato: Mapped[int | None] = mapped_column(Integer)
+    vigencia_desde: Mapped[int | None] = mapped_column(Integer)
+    vigencia_hasta: Mapped[int | None] = mapped_column(Integer)
+    importe_total: Mapped[float | None] = mapped_column(Float)
+    cif_proveedor: Mapped[str | None] = mapped_column(String(32))
+    nombre_proveedor: Mapped[str | None] = mapped_column(String(255))
+    codigo_obra: Mapped[str | None] = mapped_column(String(32))
+    nombre_obra: Mapped[str | None] = mapped_column(String(255))
+    fetched_at_utc: Mapped[str] = mapped_column(String(64), nullable=False)
+
+    document: Mapped[AlbaranDocumentMergeOrm] = relationship(back_populates="contratos")
+
+
 class AlbaranDocumentBaseOrm(Base):
     __tablename__ = "albaran_documents"
 
@@ -105,9 +154,6 @@ class AlbaranDocumentBaseOrm(Base):
     ia_output_json: Mapped[str | None] = mapped_column(Text)
     created_at_utc: Mapped[str] = mapped_column(String(64), nullable=False)
 
-    # Relación de solo lectura hacia las líneas por proveedor.
-    # El servicio 4 NUNCA escribe sobre albaran_lines (es traza histórica
-    # producida por el servicio 3). Por eso viewonly=True.
     lines: Mapped[list["AlbaranLineBaseOrm"]] = relationship(
         order_by="AlbaranLineBaseOrm.line_index",
         viewonly=True,
@@ -115,13 +161,6 @@ class AlbaranDocumentBaseOrm(Base):
 
 
 class AlbaranLineBaseOrm(Base):
-    """Líneas de extracción por proveedor (tabla poblada por servicio 3).
-
-    Refleja la estructura de ``albaran_lines_merge`` pero referencia
-    ``albaran_documents`` en lugar de la tabla merge.
-    Se modela como solo lectura desde este servicio (portal de revisión).
-    """
-
     __tablename__ = "albaran_lines"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)

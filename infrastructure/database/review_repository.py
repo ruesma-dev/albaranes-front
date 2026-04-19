@@ -7,10 +7,9 @@ from typing import Any
 from urllib.parse import urlencode
 
 from sqlalchemy import delete, func, inspect, nullslast, or_, select, text
-from sqlalchemy.orm import Session
 
 from domain.models.review_models import (
-    ALLOWED_VIEW_MODES,
+    ContratoPayload,
     DocumentDetailPayload,
     DocumentListFilters,
     DocumentListItem,
@@ -23,6 +22,7 @@ from domain.models.review_models import (
     normalize_view_mode,
 )
 from infrastructure.database.orm_models import (
+    AlbaranContratoMergeOrm,
     AlbaranDocumentBaseOrm,
     AlbaranDocumentMergeOrm,
     AlbaranLineBaseOrm,
@@ -79,39 +79,17 @@ class AlbaranReviewRepository:
     @staticmethod
     def _review_schema_statements() -> list[str]:
         return [
-            (
-                "ALTER TABLE albaran_documents_merge "
-                "ADD COLUMN IF NOT EXISTS approved BOOLEAN"
-            ),
+            "ALTER TABLE albaran_documents_merge ADD COLUMN IF NOT EXISTS approved BOOLEAN",
             "UPDATE albaran_documents_merge SET approved = FALSE WHERE approved IS NULL",
-            (
-                "ALTER TABLE albaran_documents_merge "
-                "ALTER COLUMN approved SET DEFAULT FALSE"
-            ),
-            (
-                "ALTER TABLE albaran_documents_merge "
-                "ALTER COLUMN approved SET NOT NULL"
-            ),
-            (
-                "ALTER TABLE albaran_documents_merge "
-                "ADD COLUMN IF NOT EXISTS approved_at_utc VARCHAR(64)"
-            ),
-            (
-                "ALTER TABLE albaran_documents_merge "
-                "ADD COLUMN IF NOT EXISTS approved_by VARCHAR(255)"
-            ),
-            (
-                "ALTER TABLE albaran_documents_merge "
-                "ADD COLUMN IF NOT EXISTS reviewed_at_utc VARCHAR(64)"
-            ),
-            (
-                "ALTER TABLE albaran_documents_merge "
-                "ADD COLUMN IF NOT EXISTS last_modified_at_utc VARCHAR(64)"
-            ),
-            (
-                "ALTER TABLE albaran_documents_merge "
-                "ADD COLUMN IF NOT EXISTS review_notes TEXT"
-            ),
+            "ALTER TABLE albaran_documents_merge ALTER COLUMN approved SET DEFAULT FALSE",
+            "ALTER TABLE albaran_documents_merge ALTER COLUMN approved SET NOT NULL",
+            "ALTER TABLE albaran_documents_merge ADD COLUMN IF NOT EXISTS approved_at_utc VARCHAR(64)",
+            "ALTER TABLE albaran_documents_merge ADD COLUMN IF NOT EXISTS approved_by VARCHAR(255)",
+            "ALTER TABLE albaran_documents_merge ADD COLUMN IF NOT EXISTS reviewed_at_utc VARCHAR(64)",
+            "ALTER TABLE albaran_documents_merge ADD COLUMN IF NOT EXISTS last_modified_at_utc VARCHAR(64)",
+            "ALTER TABLE albaran_documents_merge ADD COLUMN IF NOT EXISTS review_notes TEXT",
+            # Nueva columna: contrato seleccionado (ref. soft, no FK).
+            "ALTER TABLE albaran_documents_merge ADD COLUMN IF NOT EXISTS selected_contrato_codigo VARCHAR(64)",
             (
                 "CREATE INDEX IF NOT EXISTS ix_albaran_documents_merge_approved "
                 "ON albaran_documents_merge (approved)"
@@ -141,9 +119,7 @@ class AlbaranReviewRepository:
             stmt = self._apply_filters(stmt=stmt, filters=filters)
             total = session.scalar(select(func.count()).select_from(stmt.subquery())) or 0
             stmt = self._apply_sort(stmt=stmt, filters=filters)
-            stmt = stmt.offset((filters.page - 1) * filters.page_size).limit(
-                filters.page_size
-            )
+            stmt = stmt.offset((filters.page - 1) * filters.page_size).limit(filters.page_size)
             rows = session.scalars(stmt).all()
 
             approved_count = session.scalar(
@@ -181,20 +157,6 @@ class AlbaranReviewRepository:
         *,
         view_mode: str = VIEW_MODE_MERGE,
     ) -> DocumentDetailPayload | None:
-        """Carga el detalle del documento según el modo de vista solicitado.
-
-        Estrategia:
-          - El ``document_id`` en la URL es SIEMPRE el id del merge
-            (mantenemos URL estable y preview SharePoint operativo).
-          - Siempre cargamos el merge para obtener ``source_sha256`` y metadatos
-            de almacenamiento (SharePoint).
-          - Derivamos ``available_views`` a partir de los ``provider_origin``
-            presentes en ``albaran_documents`` para ese ``source_sha256``.
-          - Si ``view_mode == 'merge'`` usamos las tablas _merge (editable).
-          - Si ``view_mode`` es un proveedor (openai/gemini/claude) cargamos
-            desde ``albaran_documents`` + ``albaran_lines`` filtrado por
-            provider_origin (solo lectura).
-        """
         self.initialize()
         if not self._tables_ready():
             return None
@@ -205,7 +167,37 @@ class AlbaranReviewRepository:
             merge_doc = session.get(AlbaranDocumentMergeOrm, document_id)
             if merge_doc is None:
                 return None
-            _ = merge_doc.lines  # eager-load dentro de la sesión
+            _ = merge_doc.lines  # eager-load
+
+            # Cargar contratos asociados (read-only). Siempre se cargan,
+            # independientemente del view_mode, para que la cabecera
+            # muestre la info del contrato también en vistas por proveedor
+            # (ahí la sección es informativa, no permite cambiar selección).
+            contratos_orm = session.scalars(
+                select(AlbaranContratoMergeOrm)
+                .where(AlbaranContratoMergeOrm.document_id == merge_doc.id)
+                .order_by(AlbaranContratoMergeOrm.codigo_contrato.asc())
+            ).all()
+            contratos_payload = [
+                ContratoPayload(
+                    id=item.id,
+                    codigo_contrato=item.codigo_contrato,
+                    nombre_contrato=item.nombre_contrato,
+                    fecha_alta_contrato=item.fecha_alta_contrato,
+                    fecha_contrato=item.fecha_contrato,
+                    vigencia_desde=item.vigencia_desde,
+                    vigencia_hasta=item.vigencia_hasta,
+                    importe_total=item.importe_total,
+                    cif_proveedor=item.cif_proveedor,
+                    nombre_proveedor=item.nombre_proveedor,
+                    codigo_obra=item.codigo_obra,
+                    nombre_obra=item.nombre_obra,
+                )
+                for item in contratos_orm
+            ]
+            selected_contrato_codigo = getattr(
+                merge_doc, "selected_contrato_codigo", None
+            )
 
             provider_docs = session.scalars(
                 select(AlbaranDocumentBaseOrm)
@@ -213,19 +205,15 @@ class AlbaranReviewRepository:
                 .order_by(AlbaranDocumentBaseOrm.created_at_utc.asc())
             ).all()
 
-            # available_views = merge + proveedores encontrados en orden conocido
             seen_providers = {doc.provider_origin for doc in provider_docs}
             available_views: list[str] = [VIEW_MODE_MERGE]
             for provider in KNOWN_PROVIDER_VIEWS:
                 if provider in seen_providers:
                     available_views.append(provider)
-            # Incluir cualquier provider_origin no listado explícitamente
-            # para futuras ampliaciones (p.e. azure_di, google_di) sin tocar código.
             for provider in sorted(seen_providers):
                 if provider not in available_views:
                     available_views.append(provider)
 
-            # Si se pide una vista de proveedor sin datos, caer con seguridad a merge
             if (
                 normalized_view != VIEW_MODE_MERGE
                 and normalized_view not in seen_providers
@@ -252,18 +240,21 @@ class AlbaranReviewRepository:
                     merge_doc=merge_doc,
                     available_views=available_views,
                     provider_snapshots=provider_snapshots_payload,
+                    contratos=contratos_payload,
+                    selected_contrato_codigo=selected_contrato_codigo,
                 )
 
             provider_doc = next(
                 (doc for doc in provider_docs if doc.provider_origin == normalized_view),
                 None,
             )
-            # Defensivo: si desaparece entre la comprobación y aquí, volver a merge.
             if provider_doc is None:
                 return self._build_merge_detail(
                     merge_doc=merge_doc,
                     available_views=available_views,
                     provider_snapshots=provider_snapshots_payload,
+                    contratos=contratos_payload,
+                    selected_contrato_codigo=selected_contrato_codigo,
                 )
 
             provider_lines = session.scalars(
@@ -279,6 +270,8 @@ class AlbaranReviewRepository:
                 available_views=available_views,
                 provider_snapshots=provider_snapshots_payload,
                 view_mode=normalized_view,
+                contratos=contratos_payload,
+                selected_contrato_codigo=selected_contrato_codigo,
             )
 
     def _build_merge_detail(
@@ -287,6 +280,8 @@ class AlbaranReviewRepository:
         merge_doc: AlbaranDocumentMergeOrm,
         available_views: list[str],
         provider_snapshots: list[ProviderSnapshot],
+        contratos: list[ContratoPayload],
+        selected_contrato_codigo: str | None,
     ) -> DocumentDetailPayload:
         return DocumentDetailPayload(
             id=merge_doc.id,
@@ -322,6 +317,8 @@ class AlbaranReviewRepository:
             created_at_utc=merge_doc.created_at_utc,
             lines=[self._merge_line_to_payload(line) for line in merge_doc.lines],
             provider_snapshots=provider_snapshots,
+            contratos=contratos,
+            selected_contrato_codigo=selected_contrato_codigo,
         )
 
     def _build_provider_detail(
@@ -333,16 +330,9 @@ class AlbaranReviewRepository:
         available_views: list[str],
         provider_snapshots: list[ProviderSnapshot],
         view_mode: str,
+        contratos: list[ContratoPayload],
+        selected_contrato_codigo: str | None,
     ) -> DocumentDetailPayload:
-        """Payload de vista por proveedor (solo lectura).
-
-        Mantiene ``id`` = id del merge para que la URL / preview SharePoint
-        / navegación sigan funcionando. Los datos extraídos vienen del bloque
-        del proveedor: columnas tipadas en albaran_documents + líneas en
-        albaran_lines. Los campos no presentes en la tabla base (proveedor_cif,
-        forma_pago, obra_nombre, obra_direccion) quedan en None; la trazabilidad
-        completa está disponible en ``raw_extraction_json``.
-        """
         return DocumentDetailPayload(
             id=merge_doc.id,
             view_mode=view_mode,
@@ -378,6 +368,8 @@ class AlbaranReviewRepository:
             created_at_utc=provider_doc.created_at_utc,
             lines=[self._base_line_to_payload(line) for line in provider_lines],
             provider_snapshots=provider_snapshots,
+            contratos=contratos,
+            selected_contrato_codigo=selected_contrato_codigo,
         )
 
     def update_document(
@@ -403,6 +395,23 @@ class AlbaranReviewRepository:
             document.review_notes = self._clean_text(payload.review_notes)
             document.reviewed_at_utc = self._utc_iso()
             document.last_modified_at_utc = self._utc_iso()
+
+            # Actualiza selected_contrato_codigo validando contra los
+            # contratos realmente guardados del doc. Si el usuario manda
+            # un código que no existe (p.e. JSON manipulado), dejamos NULL
+            # en lugar de guardar una referencia rota.
+            proposed_codigo = self._clean_text(payload.selected_contrato_codigo)
+            if proposed_codigo is not None:
+                existing_codes = set(
+                    session.scalars(
+                        select(AlbaranContratoMergeOrm.codigo_contrato).where(
+                            AlbaranContratoMergeOrm.document_id == document.id
+                        )
+                    ).all()
+                )
+                if proposed_codigo not in existing_codes:
+                    proposed_codigo = None
+            document.selected_contrato_codigo = proposed_codigo
 
             if payload.approved:
                 document.approved = True
@@ -533,12 +542,6 @@ class AlbaranReviewRepository:
 
     @staticmethod
     def _base_line_to_payload(line: AlbaranLineBaseOrm) -> MergeLinePayload:
-        """Adapta una línea de ``albaran_lines`` al payload de MergeLinePayload.
-
-        Los campos de merge-only (confidence_pct_calc, line_match_score,
-        comparison_status_json, field_scores_json) quedan en ``None`` porque
-        son fruto del post-proceso y no existen en la tabla base.
-        """
         return MergeLinePayload(
             id=line.id,
             line_index=line.line_index,
