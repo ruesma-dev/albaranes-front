@@ -1,29 +1,25 @@
 // static/app.js
 //
 // Portal de revisión — interacciones del detalle editable:
-//   - Selector de contrato cuando hay varios: al cambiar el dropdown
-//     se muestra la card correspondiente (oculta las demás).
-//   - Render + edición inline de las líneas del albarán.
-//   - Guardado contra PUT /api/documents/{id}, incluyendo el
-//     ``selected_contrato_codigo`` en el payload.
+//   - Selector de contrato cuando hay varios.
+//   - Edición inline de líneas.
+//   - Guardar/Aprobar contra PUT /api/documents/{id}.
+//   - Botones "Guardar y volver a buscar" / "Solo volver a buscar"
+//     dentro del alert amarillo cuando hay 0 contratos. Llaman a
+//     POST /api/documents/{id}/re-fetch-contratos.
 //
-// Formato de fechas (YYYYMMDD -> YYYY-MM-DD) e importes (es-ES con €)
-// se hace server-side en el template vía filtros Jinja2. El JS de
-// cliente ya no hace formato de presentación.
-//
-// Si no hay <script id="document-data"> (vista por proveedor =
-// read-only), el módulo solo cablea el selector de contrato y sale.
+// Formateo de fechas e importes: se hace server-side con filtros
+// Jinja2 (fecha_int_iso, importe_eur). El JS no formatea presentación.
 
 (function () {
     "use strict";
 
-    // ---------- Selector de contrato (solo si hay >1 en el select) -------
+    // --------------------------------------------------------------- //
+    // Selector de contrato cuando hay varios (muestra la card elegida).
+    // --------------------------------------------------------------- //
     function wireContratoSelector() {
         const selector = document.getElementById("selected_contrato_codigo");
-        if (!selector || selector.tagName !== "SELECT") {
-            // O no existe (0 contratos), o es <input hidden> (1 contrato).
-            return;
-        }
+        if (!selector || selector.tagName !== "SELECT") return;
         const cards = document.querySelectorAll(".js-contrato-card");
         selector.addEventListener("change", function () {
             const codigo = selector.value;
@@ -35,10 +31,12 @@
 
     wireContratoSelector();
 
-    // ---------- Edición de líneas del albarán ---------------------------
+    // --------------------------------------------------------------- //
+    // Edición de líneas del albarán (solo en vista merge)
+    // --------------------------------------------------------------- //
     const dataTag = document.getElementById("document-data");
     if (!dataTag) {
-        // Vista por proveedor (read-only) → nada más que hacer aquí.
+        // Vista por proveedor (read-only) → no cableamos nada más.
         return;
     }
 
@@ -59,6 +57,9 @@
     const addLineBtn = document.getElementById("add-line-btn");
     const saveBtn = document.getElementById("save-btn");
     const approveBtn = document.getElementById("approve-btn");
+    const saveAndRefetchBtn = document.getElementById("save-and-refetch-btn");
+    const refetchOnlyBtn = document.getElementById("refetch-only-btn");
+    const refetchStatus = document.getElementById("refetch-status");
 
     function lineToRow(line, index) {
         const tr = document.createElement("tr");
@@ -218,12 +219,131 @@
                 detail = body.detail || detail;
             } catch (_) {}
             alert("Error al guardar: " + detail);
-            return;
+            return false;
         }
+        if (markApproved) {
+            // Solo redirigimos en el flujo de aprobar — en Guardar puro
+            // también, mantenemos el comportamiento original.
+            const body = await response.json();
+            window.location.href = body.redirect_url;
+            return true;
+        }
+        // Guardar sin aprobar: redirigir o recargar. Mantenemos el
+        // redirect como antes.
         const body = await response.json();
         window.location.href = body.redirect_url;
+        return true;
     }
 
     if (saveBtn) saveBtn.addEventListener("click", function () { sendSave(false); });
     if (approveBtn) approveBtn.addEventListener("click", function () { sendSave(true); });
+
+    // --------------------------------------------------------------- //
+    // Re-búsqueda manual de contratos (alert amarillo de "0 contratos")
+    // --------------------------------------------------------------- //
+    function paintStatus(kind, text) {
+        if (!refetchStatus) return;
+        refetchStatus.hidden = false;
+        refetchStatus.className = "refetch-status refetch-" + kind;
+        refetchStatus.textContent = text;
+    }
+
+    function setButtonsDisabled(disabled) {
+        [saveAndRefetchBtn, refetchOnlyBtn].forEach(function (btn) {
+            if (btn) btn.disabled = disabled;
+        });
+    }
+
+    async function refetchContratos() {
+        const response = await fetch(
+            `/api/documents/${documentId}/re-fetch-contratos`,
+            { method: "POST", headers: { "Content-Type": "application/json" } }
+        );
+        if (!response.ok) {
+            let detail = response.statusText;
+            try {
+                const body = await response.json();
+                detail = body.detail || detail;
+            } catch (_) {}
+            throw new Error(detail);
+        }
+        return response.json();
+    }
+
+    async function handleSaveAndRefetch() {
+        setButtonsDisabled(true);
+        paintStatus("info", "Guardando cambios…");
+        try {
+            // 1) Guardamos los campos SIN aprobar. En vez de redirigir,
+            //    hacemos la llamada directa al API de guardar.
+            const savePayload = collectPayload(false);
+            // forzamos que el flag de "approved" no cambie nada
+            const saveResp = await fetch(`/api/documents/${documentId}`, {
+                method: "PUT",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(savePayload),
+            });
+            if (!saveResp.ok) {
+                let detail = saveResp.statusText;
+                try {
+                    const body = await saveResp.json();
+                    detail = body.detail || detail;
+                } catch (_) {}
+                paintStatus("error", "Error al guardar: " + detail);
+                setButtonsDisabled(false);
+                return;
+            }
+
+            // 2) Re-búsqueda.
+            paintStatus("info", "Consultando ERP…");
+            const outcome = await refetchContratos();
+            handleRefetchOutcome(outcome);
+        } catch (exc) {
+            paintStatus("error", "Error: " + (exc.message || exc));
+            setButtonsDisabled(false);
+        }
+    }
+
+    async function handleRefetchOnly() {
+        setButtonsDisabled(true);
+        paintStatus("info", "Consultando ERP…");
+        try {
+            const outcome = await refetchContratos();
+            handleRefetchOutcome(outcome);
+        } catch (exc) {
+            paintStatus("error", "Error: " + (exc.message || exc));
+            setButtonsDisabled(false);
+        }
+    }
+
+    function handleRefetchOutcome(outcome) {
+        const kind = {
+            found_single: "success",
+            found_multiple: "success",
+            no_results: "warning",
+            skipped_missing_data: "warning",
+            sigrid_error: "error",
+        }[outcome.status] || "info";
+
+        paintStatus(kind, outcome.message || "Sin mensaje.");
+
+        // Si hemos encontrado contratos, recargamos para pintar la card
+        // (o el desplegable) en lugar del alert amarillo.
+        if (outcome.count > 0) {
+            setTimeout(function () {
+                window.location.reload();
+            }, 700);
+            return;
+        }
+        // Si seguimos sin resultados o ha habido error, mantenemos al
+        // usuario en la página para que pueda editar/volver a intentar.
+        setButtonsDisabled(false);
+    }
+
+    if (saveAndRefetchBtn) {
+        saveAndRefetchBtn.addEventListener("click", handleSaveAndRefetch);
+    }
+    if (refetchOnlyBtn) {
+        refetchOnlyBtn.addEventListener("click", handleRefetchOnly);
+    }
 })();

@@ -8,6 +8,7 @@ from urllib.parse import urlencode
 
 from sqlalchemy import delete, func, inspect, nullslast, or_, select, text
 
+from domain.models.contrato_sigrid_models import ContratoFromSigrid
 from domain.models.review_models import (
     ContratoPayload,
     DocumentDetailPayload,
@@ -371,6 +372,93 @@ class AlbaranReviewRepository:
             contratos=contratos,
             selected_contrato_codigo=selected_contrato_codigo,
         )
+
+    # ================================================================== #
+    # Re-fetch manual de contratos desde el portal.
+    # Usado por ContratoRefetchService para:
+    #   1) Leer el (cif, obra) actuales del merge.
+    #   2) Tras llamar a Sigrid, reemplazar atómicamente los contratos
+    #      guardados y fijar selected_contrato_codigo en un solo paso.
+    # Deliberadamente NO toca reviewed_at_utc ni last_modified_at_utc
+    # porque esto es un enriquecimiento automático, no una edición
+    # humana (auditoría intacta).
+    # ================================================================== #
+    def get_merge_cif_and_obra(
+        self,
+        *,
+        document_id: str,
+    ) -> tuple[str | None, str | None]:
+        """Devuelve (proveedor_cif, obra_codigo) del merge doc.
+
+        Devuelve (None, None) si el documento no existe. No lanza excepción
+        porque el endpoint ya valida la existencia del doc antes; aquí solo
+        leemos valores.
+        """
+        self.initialize()
+        with self._session_factory.create_session() as session:
+            document = session.get(AlbaranDocumentMergeOrm, document_id)
+            if document is None:
+                return None, None
+            return document.proveedor_cif, document.obra_codigo
+
+    def replace_contratos_and_select(
+        self,
+        *,
+        document_id: str,
+        contratos: list[ContratoFromSigrid],
+        selected_codigo: str | None,
+    ) -> None:
+        """Reemplaza los contratos del documento e inserta la selección.
+
+        Flujo transaccional:
+          1) DELETE de todos los contratos previos del documento.
+          2) INSERT de los recibidos de Sigrid.
+          3) UPDATE del selected_contrato_codigo (0 ó 1 código).
+        Si algo casca, el commit no se ejecuta y queda como estaba.
+        """
+        self.initialize()
+        now = datetime.now(timezone.utc).isoformat()
+        with self._session_factory.create_session() as session:
+            merge_doc = session.get(AlbaranDocumentMergeOrm, document_id)
+            if merge_doc is None:
+                raise KeyError(f"Documento merge no encontrado: {document_id}")
+
+            session.execute(
+                delete(AlbaranContratoMergeOrm).where(
+                    AlbaranContratoMergeOrm.document_id == document_id
+                )
+            )
+            session.flush()
+
+            for contrato in contratos:
+                session.add(
+                    AlbaranContratoMergeOrm(
+                        document_id=document_id,
+                        codigo_contrato=contrato.codigo_contrato,
+                        nombre_contrato=contrato.nombre_contrato,
+                        fecha_alta_contrato=contrato.fecha_alta_contrato,
+                        fecha_contrato=contrato.fecha_contrato,
+                        vigencia_desde=contrato.vigencia_desde,
+                        vigencia_hasta=contrato.vigencia_hasta,
+                        importe_total=contrato.importe_total,
+                        cif_proveedor=contrato.cif_proveedor,
+                        nombre_proveedor=contrato.nombre_proveedor,
+                        codigo_obra=contrato.codigo_obra,
+                        nombre_obra=contrato.nombre_obra,
+                        fetched_at_utc=now,
+                    )
+                )
+
+            session.execute(
+                text(
+                    "UPDATE albaran_documents_merge "
+                    "SET selected_contrato_codigo = :codigo "
+                    "WHERE id = :doc_id"
+                ),
+                {"codigo": selected_codigo, "doc_id": document_id},
+            )
+
+            session.commit()
 
     def update_document(
         self,

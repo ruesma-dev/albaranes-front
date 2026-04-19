@@ -80,9 +80,6 @@
     </aside>
 
     <section class="panel editor-panel">
-        {# ============================================================== #}
-        {# BLOQUE DE CONTRATO (cabecera, antes de las líneas)              #}
-        {# ============================================================== #}
         <section class="contrato-section">
             <div class="subsection-header">
                 <h3>Contrato asociado</h3>
@@ -98,10 +95,37 @@
             </div>
 
             {% if document.contratos|length == 0 %}
+                {# ============================================================== #}
+                {# CASO 0 contratos — alert + acciones de re-búsqueda manual      #}
+                {# ============================================================== #}
                 <div class="alert warning contrato-empty">
-                    No se encontró ningún contrato en el ERP para la combinación
-                    CIF <code>{{ document.proveedor_cif or '—' }}</code> + obra <code>{{ document.obra_codigo or '—' }}</code>.
-                    Revisa que los valores sean correctos en el bloque de campos de abajo.
+                    <div class="contrato-empty-text">
+                        No se encontró ningún contrato en el ERP para la combinación
+                        CIF <code>{{ document.proveedor_cif or '—' }}</code> +
+                        obra <code>{{ document.obra_codigo or '—' }}</code>.
+                        Revisa que los valores sean correctos en el bloque de campos de abajo.
+                    </div>
+                    {% if document.is_editable %}
+                        <div class="contrato-empty-actions">
+                            <button type="button"
+                                    class="btn success small"
+                                    id="save-and-refetch-btn"
+                                    title="Guarda los campos editados y vuelve a consultar el ERP">
+                                Guardar y volver a buscar
+                            </button>
+                            <button type="button"
+                                    class="btn secondary small"
+                                    id="refetch-only-btn"
+                                    title="Solo re-consulta el ERP sin guardar nada">
+                                Solo volver a buscar
+                            </button>
+                            <span class="contrato-empty-hint muted small">
+                                Edita CIF u obra más abajo y pulsa
+                                <em>Guardar y volver a buscar</em>.
+                            </span>
+                        </div>
+                        <div id="refetch-status" class="refetch-status" hidden></div>
+                    {% endif %}
                 </div>
             {% elif document.contratos|length == 1 %}
                 {% set c = document.contratos[0] %}

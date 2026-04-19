@@ -14,6 +14,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Resp
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+from application.services.contrato_refetch_service import ContratoRefetchService
 from application.services.review_service import ReviewService
 from config.settings import Settings
 from domain.models.review_models import (
@@ -28,6 +29,7 @@ from domain.models.review_models import (
 from infrastructure.database.review_repository import AlbaranReviewRepository
 from infrastructure.database.session_factory import SessionFactory
 from infrastructure.graph.token_provider import GraphTokenProvider
+from infrastructure.sigrid.sigrid_api_contrato_client import SigridApiContratoClient
 
 logger = logging.getLogger(__name__)
 
@@ -45,16 +47,10 @@ def _view_label(view_mode: str) -> str:
 
 
 # ------------------------------------------------------------------ #
-# Filtros Jinja2 para formatear campos en el servidor.
-# Los datos se guardan en BBDD en crudo (INT YYYYMMDD para fechas,
-# float para importes); solo se formatean al pintar el HTML.
-# Esto evita depender de JS de cliente para la presentación.
+# Filtros Jinja2 para formatear en servidor.
 # ------------------------------------------------------------------ #
 def _format_fecha_int_iso(value: Any) -> str:
-    """Convierte un INT YYYYMMDD (p.ej. 20260115) a ``YYYY-MM-DD``.
-
-    Valor 0, None, vacío o cualquier cosa no parseable → ``—``.
-    """
+    """INT YYYYMMDD (20260115) -> 'YYYY-MM-DD' (2026-01-15). 0/None -> '—'."""
     if value is None or value == "" or value == 0 or value == "0":
         return "—"
     try:
@@ -62,7 +58,6 @@ def _format_fecha_int_iso(value: Any) -> str:
     except (TypeError, ValueError):
         return "—"
     if n < 1_000_00_01 or n > 9999_12_31:
-        # Fuera de rango razonable
         return "—"
     year = n // 10000
     month = (n // 100) % 100
@@ -73,20 +68,14 @@ def _format_fecha_int_iso(value: Any) -> str:
 
 
 def _format_importe_eur(value: Any) -> str:
-    """Convierte un float a ``335.370,42 €`` (locale es-ES manual).
-
-    Uso reemplazos en vez de ``locale.format_string`` porque la disponibilidad
-    de la locale es-ES varía entre SO (Windows vs Linux vs Docker alpine),
-    y aquí nos interesa determinismo.
-    """
+    """float -> '335.370,42 €' (locale es-ES determinista). None/'' -> '—'."""
     if value is None or value == "":
         return "—"
     try:
         number = float(value)
     except (TypeError, ValueError):
         return "—"
-    formatted = "{:,.2f}".format(number)  # 335,370.42 (US)
-    # Swap de separadores para es-ES: ',' miles -> '.' y '.' decimales -> ','
+    formatted = "{:,.2f}".format(number)
     formatted = formatted.replace(",", "X").replace(".", ",").replace("X", ".")
     return f"{formatted} €"
 
@@ -115,6 +104,42 @@ def build_app(settings: Settings) -> FastAPI:
         else None
     )
 
+    # ------------------------------------------------------------------ #
+    # Wiring del servicio de re-fetch manual de contratos desde el portal.
+    # Requiere las credenciales SIGRID_API_* en .env / Settings.
+    # Si faltan, queda None y el endpoint devuelve 503.
+    # ------------------------------------------------------------------ #
+    contrato_refetch_service: ContratoRefetchService | None = None
+    sigrid_base = getattr(settings, "sigrid_api_base_url", None)
+    sigrid_key = getattr(settings, "sigrid_api_function_key", None)
+    sigrid_db = getattr(settings, "sigrid_api_database", None)
+    sigrid_timeout = getattr(settings, "sigrid_api_timeout_s", 30.0)
+    if sigrid_base and sigrid_key and sigrid_db:
+        sigrid_client = SigridApiContratoClient(
+            base_url=sigrid_base,
+            function_key=sigrid_key,
+            database=sigrid_db,
+            timeout_s=float(sigrid_timeout),
+        )
+        contrato_refetch_service = ContratoRefetchService(
+            client=sigrid_client,
+            repository=repository,
+            enabled=True,
+        )
+        logger.info(
+            "[contrato-refetch][wiring] ContratoRefetchService ACTIVADO "
+            "contra %s db=%s",
+            sigrid_base,
+            sigrid_db,
+        )
+    else:
+        logger.warning(
+            "[contrato-refetch][wiring] ContratoRefetchService NO creado: "
+            "faltan SIGRID_API_BASE_URL/FUNCTION_KEY/DATABASE en settings. "
+            "El endpoint POST /api/documents/{id}/re-fetch-contratos devolverá 503."
+        )
+    app.state.contrato_refetch_service = contrato_refetch_service
+
     templates = Jinja2Templates(
         directory=str(Path(__file__).resolve().parents[2] / "templates")
     )
@@ -123,7 +148,6 @@ def build_app(settings: Settings) -> FastAPI:
         ensure_ascii=False,
         indent=2,
     )
-    # Filtros nuevos para el bloque de contrato asociado.
     templates.env.filters["fecha_int_iso"] = _format_fecha_int_iso
     templates.env.filters["importe_eur"] = _format_importe_eur
     templates.env.globals["view_label"] = _view_label
@@ -147,6 +171,7 @@ def build_app(settings: Settings) -> FastAPI:
                 "default_page_size": settings.default_page_size,
                 "max_page_size": settings.max_page_size,
                 "preview_enabled": settings.preview_enabled,
+                "contrato_refetch_wired": contrato_refetch_service is not None,
             },
         )
 
@@ -176,8 +201,8 @@ def build_app(settings: Settings) -> FastAPI:
             search=search,
             approved=approved,
             review_required=review_required,
-            min_confidence=_parse_optional_float(min_confidence, field_name='min_confidence'),
-            max_confidence=_parse_optional_float(max_confidence, field_name='max_confidence'),
+            min_confidence=_parse_optional_float(min_confidence, field_name="min_confidence"),
+            max_confidence=_parse_optional_float(max_confidence, field_name="max_confidence"),
             sort_by=sort_by,
             sort_dir=sort_dir,
             page=page,
@@ -438,6 +463,47 @@ def build_app(settings: Settings) -> FastAPI:
                 else "Documento guardado"
             ),
         )
+
+    # ------------------------------------------------------------------ #
+    # ENDPOINT NUEVO: re-fetch manual de contratos desde el portal.
+    # Se invoca desde los botones del alert amarillo en la vista de detalle.
+    # Siempre devuelve 200 con 'status' explicativo en cuerpo, excepto:
+    #  - 404: documento no existe
+    #  - 503: servicio Sigrid no configurado en este servicio
+    # ------------------------------------------------------------------ #
+    @app.post("/api/documents/{document_id}/re-fetch-contratos")
+    def refetch_contratos_api(document_id: str) -> dict:
+        service: ContratoRefetchService | None = app.state.contrato_refetch_service
+        if service is None:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "La búsqueda de contratos no está configurada en este "
+                    "servicio. Revisa SIGRID_API_BASE_URL/FUNCTION_KEY/"
+                    "DATABASE en el .env."
+                ),
+            )
+
+        preview = review_service.get_document(document_id)
+        if preview is None:
+            raise HTTPException(status_code=404, detail="Documento no encontrado")
+
+        outcome = service.refetch(document_id=document_id)
+        logger.info(
+            "[contrato-refetch][api] document_id=%s outcome=%s count=%s selected=%s",
+            document_id,
+            outcome.status,
+            outcome.count,
+            outcome.selected_contrato_codigo,
+        )
+        return {
+            "status": outcome.status,
+            "count": outcome.count,
+            "selected_contrato_codigo": outcome.selected_contrato_codigo,
+            "message": outcome.message,
+            "cif": outcome.cif,
+            "obra_codigo": outcome.obra_codigo,
+        }
 
     @app.exception_handler(KeyError)
     async def key_error_handler(_: Request, exc: KeyError) -> JSONResponse:

@@ -22,6 +22,11 @@ class Settings(BaseSettings):
     pg_admin_password: str = Field(..., alias="PG_ADMIN_PASSWORD")
     auto_create_database: bool = Field(True, alias="AUTO_CREATE_DATABASE")
 
+    sigrid_api_base_url: str | None = Field(default=None, alias="SIGRID_API_BASE_URL")
+    sigrid_api_function_key: str | None = Field(default=None, alias="SIGRID_API_FUNCTION_KEY")
+    sigrid_api_database: str | None = Field(default=None, alias="SIGRID_API_DATABASE")
+    sigrid_api_timeout_s: float = Field(default=30.0, alias="SIGRID_API_TIMEOUT_S")
+
     graph_key: str | None = Field(None, alias="GRAPH_KEY")
     sharepoint_drive_id: str | None = Field(None, alias="SHAREPOINT_DRIVE_ID")
     graph_timeout_s: int = Field(60, alias="GRAPH_TIMEOUT_S")
