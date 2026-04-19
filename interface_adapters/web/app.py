@@ -32,8 +32,6 @@ from infrastructure.graph.token_provider import GraphTokenProvider
 logger = logging.getLogger(__name__)
 
 
-# Etiquetas legibles para mostrar en el desplegable de selector de vista.
-# Cualquier provider_origin no listado aquí se mostrará con su nombre en crudo.
 VIEW_LABELS = {
     VIEW_MODE_MERGE: "Consolidado (merge)",
     "openai": "OpenAI",
@@ -44,6 +42,53 @@ VIEW_LABELS = {
 
 def _view_label(view_mode: str) -> str:
     return VIEW_LABELS.get(view_mode, view_mode.replace("_", " ").title())
+
+
+# ------------------------------------------------------------------ #
+# Filtros Jinja2 para formatear campos en el servidor.
+# Los datos se guardan en BBDD en crudo (INT YYYYMMDD para fechas,
+# float para importes); solo se formatean al pintar el HTML.
+# Esto evita depender de JS de cliente para la presentación.
+# ------------------------------------------------------------------ #
+def _format_fecha_int_iso(value: Any) -> str:
+    """Convierte un INT YYYYMMDD (p.ej. 20260115) a ``YYYY-MM-DD``.
+
+    Valor 0, None, vacío o cualquier cosa no parseable → ``—``.
+    """
+    if value is None or value == "" or value == 0 or value == "0":
+        return "—"
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return "—"
+    if n < 1_000_00_01 or n > 9999_12_31:
+        # Fuera de rango razonable
+        return "—"
+    year = n // 10000
+    month = (n // 100) % 100
+    day = n % 100
+    if month < 1 or month > 12 or day < 1 or day > 31:
+        return "—"
+    return f"{year:04d}-{month:02d}-{day:02d}"
+
+
+def _format_importe_eur(value: Any) -> str:
+    """Convierte un float a ``335.370,42 €`` (locale es-ES manual).
+
+    Uso reemplazos en vez de ``locale.format_string`` porque la disponibilidad
+    de la locale es-ES varía entre SO (Windows vs Linux vs Docker alpine),
+    y aquí nos interesa determinismo.
+    """
+    if value is None or value == "":
+        return "—"
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return "—"
+    formatted = "{:,.2f}".format(number)  # 335,370.42 (US)
+    # Swap de separadores para es-ES: ',' miles -> '.' y '.' decimales -> ','
+    formatted = formatted.replace(",", "X").replace(".", ",").replace("X", ".")
+    return f"{formatted} €"
 
 
 def build_app(settings: Settings) -> FastAPI:
@@ -78,6 +123,9 @@ def build_app(settings: Settings) -> FastAPI:
         ensure_ascii=False,
         indent=2,
     )
+    # Filtros nuevos para el bloque de contrato asociado.
+    templates.env.filters["fecha_int_iso"] = _format_fecha_int_iso
+    templates.env.filters["importe_eur"] = _format_importe_eur
     templates.env.globals["view_label"] = _view_label
     app.mount(
         "/static",
@@ -237,9 +285,6 @@ def build_app(settings: Settings) -> FastAPI:
 
     @app.get("/documents/{document_id}/preview", response_class=Response)
     def document_preview(document_id: str) -> Response:
-        # El preview se sirve SIEMPRE desde la información del merge porque es
-        # ahí donde viven las referencias a SharePoint (todos los proveedores
-        # comparten el mismo PDF original).
         document = review_service.get_document(document_id)
         if document is None:
             raise HTTPException(status_code=404, detail="Documento no encontrado")
@@ -371,9 +416,6 @@ def build_app(settings: Settings) -> FastAPI:
         document_id: str,
         payload: MergeDocumentUpdatePayload,
     ) -> SaveResponse:
-        # La escritura solo aplica al merge (fuente de verdad para la revisión).
-        # El front oculta los botones de guardar/aprobar en las vistas por
-        # proveedor; aquí simplemente se escribe contra el merge por id.
         try:
             detail = review_service.save_document(
                 document_id=document_id,
@@ -404,7 +446,6 @@ def build_app(settings: Settings) -> FastAPI:
     return app
 
 
-
 def _parse_optional_float(value: str | None, *, field_name: str) -> float | None:
     if value is None:
         return None
@@ -425,6 +466,7 @@ def _parse_optional_float(value: str | None, *, field_name: str) -> float | None
                 }
             ],
         ) from exc
+
 
 def _query_string(
     filters: DocumentListFilters,
@@ -478,32 +520,10 @@ def _preview_error_response(
         <meta charset="utf-8">
         <title>Vista previa no disponible</title>
         <style>
-            body {{
-                font-family: Arial, sans-serif;
-                background: #f8fafc;
-                color: #1f2937;
-                margin: 0;
-                padding: 24px;
-            }}
-            .card {{
-                max-width: 720px;
-                margin: 0 auto;
-                background: #ffffff;
-                border: 1px solid #dbe4f0;
-                border-radius: 12px;
-                padding: 24px;
-                box-shadow: 0 8px 24px rgba(15, 23, 42, 0.06);
-            }}
+            body {{ font-family: Arial, sans-serif; background: #f8fafc; color: #1f2937; margin: 0; padding: 24px; }}
+            .card {{ max-width: 720px; margin: 0 auto; background: #ffffff; border: 1px solid #dbe4f0; border-radius: 12px; padding: 24px; box-shadow: 0 8px 24px rgba(15, 23, 42, 0.06); }}
             h1 {{ margin-top: 0; font-size: 22px; }}
             p {{ line-height: 1.5; }}
-            code {{
-                display: block;
-                white-space: pre-wrap;
-                background: #f1f5f9;
-                border-radius: 8px;
-                padding: 12px;
-                color: #0f172a;
-            }}
             a {{ color: #2563eb; text-decoration: none; }}
         </style>
     </head>

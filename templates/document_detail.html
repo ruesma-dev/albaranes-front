@@ -82,8 +82,6 @@
     <section class="panel editor-panel">
         {# ============================================================== #}
         {# BLOQUE DE CONTRATO (cabecera, antes de las líneas)              #}
-        {# Siempre se muestra, tanto en vista merge como en vistas         #}
-        {# por proveedor. Solo es interactivo en la vista merge.           #}
         {# ============================================================== #}
         <section class="contrato-section">
             <div class="subsection-header">
@@ -106,42 +104,33 @@
                     Revisa que los valores sean correctos en el bloque de campos de abajo.
                 </div>
             {% elif document.contratos|length == 1 %}
-                {# UN SOLO contrato → mostramos card read-only con los 4 campos pedidos #}
                 {% set c = document.contratos[0] %}
                 <div class="contrato-card" data-codigo="{{ c.codigo_contrato }}">
-                    <div class="contrato-grid">
-                        <div>
-                            <dt>Código</dt>
-                            <dd><code>{{ c.codigo_contrato }}</code></dd>
-                        </div>
-                        <div class="contrato-nombre">
-                            <dt>Nombre</dt>
-                            <dd>{{ c.nombre_contrato or '—' }}</dd>
-                        </div>
-                        <div>
-                            <dt>Fecha alta</dt>
-                            <dd data-fecha-int="{{ c.fecha_alta_contrato or '' }}">
-                                {% if c.fecha_alta_contrato %}
-                                    <span class="js-fecha-formatted">{{ c.fecha_alta_contrato }}</span>
-                                {% else %}—{% endif %}
-                            </dd>
-                        </div>
-                        <div>
-                            <dt>Importe total</dt>
-                            <dd data-importe="{{ c.importe_total if c.importe_total is not none else '' }}">
-                                {% if c.importe_total is not none %}
-                                    <span class="js-importe-formatted">{{ '%.2f'|format(c.importe_total) }} €</span>
-                                {% else %}—{% endif %}
-                            </dd>
+                    <div class="contrato-scroll">
+                        <div class="contrato-grid">
+                            <div>
+                                <dt>Código</dt>
+                                <dd><code>{{ c.codigo_contrato }}</code></dd>
+                            </div>
+                            <div class="contrato-nombre">
+                                <dt>Nombre</dt>
+                                <dd>{{ c.nombre_contrato or '—' }}</dd>
+                            </div>
+                            <div>
+                                <dt>Fecha alta</dt>
+                                <dd>{{ c.fecha_alta_contrato | fecha_int_iso }}</dd>
+                            </div>
+                            <div>
+                                <dt>Importe total</dt>
+                                <dd>{{ c.importe_total | importe_eur }}</dd>
+                            </div>
                         </div>
                     </div>
                 </div>
-                {# Input oculto para que el Save payload lo incluya automáticamente #}
                 {% if document.is_editable %}
                     <input type="hidden" id="selected_contrato_codigo" value="{{ c.codigo_contrato }}">
                 {% endif %}
             {% else %}
-                {# VARIOS contratos → desplegable por nombre, card refleja el seleccionado #}
                 <div class="contrato-multi">
                     {% if document.is_editable %}
                         <label class="full-width">
@@ -159,43 +148,35 @@
                             </select>
                         </label>
                     {% else %}
-                        {# En vistas por proveedor, mostramos solo el seleccionado #}
                         <div class="muted small">
                             Cambia a la vista <strong>{{ view_label('merge') }}</strong>
                             para elegir otro contrato.
                         </div>
                     {% endif %}
 
-                    {# Cards de cada contrato — una se muestra a la vez según el selector #}
                     {% for c in document.contratos %}
                         {% set is_selected = c.codigo_contrato == document.selected_contrato_codigo %}
                         <div class="contrato-card js-contrato-card"
                              data-codigo="{{ c.codigo_contrato }}"
                              style="{% if not is_selected %}display:none;{% endif %}">
-                            <div class="contrato-grid">
-                                <div>
-                                    <dt>Código</dt>
-                                    <dd><code>{{ c.codigo_contrato }}</code></dd>
-                                </div>
-                                <div class="contrato-nombre">
-                                    <dt>Nombre</dt>
-                                    <dd>{{ c.nombre_contrato or '—' }}</dd>
-                                </div>
-                                <div>
-                                    <dt>Fecha alta</dt>
-                                    <dd data-fecha-int="{{ c.fecha_alta_contrato or '' }}">
-                                        {% if c.fecha_alta_contrato %}
-                                            <span class="js-fecha-formatted">{{ c.fecha_alta_contrato }}</span>
-                                        {% else %}—{% endif %}
-                                    </dd>
-                                </div>
-                                <div>
-                                    <dt>Importe total</dt>
-                                    <dd data-importe="{{ c.importe_total if c.importe_total is not none else '' }}">
-                                        {% if c.importe_total is not none %}
-                                            <span class="js-importe-formatted">{{ '%.2f'|format(c.importe_total) }} €</span>
-                                        {% else %}—{% endif %}
-                                    </dd>
+                            <div class="contrato-scroll">
+                                <div class="contrato-grid">
+                                    <div>
+                                        <dt>Código</dt>
+                                        <dd><code>{{ c.codigo_contrato }}</code></dd>
+                                    </div>
+                                    <div class="contrato-nombre">
+                                        <dt>Nombre</dt>
+                                        <dd>{{ c.nombre_contrato or '—' }}</dd>
+                                    </div>
+                                    <div>
+                                        <dt>Fecha alta</dt>
+                                        <dd>{{ c.fecha_alta_contrato | fecha_int_iso }}</dd>
+                                    </div>
+                                    <div>
+                                        <dt>Importe total</dt>
+                                        <dd>{{ c.importe_total | importe_eur }}</dd>
+                                    </div>
                                 </div>
                             </div>
                         </div>

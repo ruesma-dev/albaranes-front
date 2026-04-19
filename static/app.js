@@ -1,68 +1,23 @@
 // static/app.js
 //
 // Portal de revisión — interacciones del detalle editable:
-//  - Render + edición inline de las líneas del albarán (tabla dinámica).
-//  - Selector de contrato: cuando hay varios contratos, al cambiar el
-//    dropdown se muestra la card correspondiente (JS puro, sin frameworks).
-//  - Guardado contra PUT /api/documents/{id} incluyendo
-//    ``selected_contrato_codigo`` (si procede).
-//  - Formateo local de fecha (INT YYYYMMDD -> DD/MM/YYYY) e importe
-//    (float -> "1.574.610,32 €" locale es-ES).
+//   - Selector de contrato cuando hay varios: al cambiar el dropdown
+//     se muestra la card correspondiente (oculta las demás).
+//   - Render + edición inline de las líneas del albarán.
+//   - Guardado contra PUT /api/documents/{id}, incluyendo el
+//     ``selected_contrato_codigo`` en el payload.
 //
-// Se ejecuta al final del body. Si no hay <script id="document-data">
-// (vista por proveedor = read-only), el módulo sale sin hacer nada.
+// Formato de fechas (YYYYMMDD -> YYYY-MM-DD) e importes (es-ES con €)
+// se hace server-side en el template vía filtros Jinja2. El JS de
+// cliente ya no hace formato de presentación.
+//
+// Si no hay <script id="document-data"> (vista por proveedor =
+// read-only), el módulo solo cablea el selector de contrato y sale.
 
 (function () {
     "use strict";
 
-    // ---------- Utilidades de formato (usadas también por el HTML) -------
-    function formatFechaInt(value) {
-        // value esperado: entero YYYYMMDD (ej. 20241122). 0 ó null => "—".
-        if (value === null || value === undefined || value === "" || Number(value) === 0) {
-            return "—";
-        }
-        const s = String(value);
-        if (s.length !== 8) return s;
-        const year = s.substring(0, 4);
-        const month = s.substring(4, 6);
-        const day = s.substring(6, 8);
-        return `${day}/${month}/${year}`;
-    }
-
-    function formatImporteEur(value) {
-        if (value === null || value === undefined || value === "") return "—";
-        const n = Number(value);
-        if (!Number.isFinite(n)) return "—";
-        return n.toLocaleString("es-ES", {
-            style: "currency",
-            currency: "EUR",
-            minimumFractionDigits: 2,
-            maximumFractionDigits: 2,
-        });
-    }
-
-    // Formateamos en cliente los campos que el backend mandó en crudo.
-    // Hacemos esto SIEMPRE (también en vistas read-only) porque solo
-    // toca textos visibles dentro de nodos marcados con data-*.
-    function applyFormattingPass(root) {
-        root = root || document;
-        // Fechas tipo INT YYYYMMDD
-        root.querySelectorAll("[data-fecha-int] .js-fecha-formatted").forEach(function (el) {
-            const parent = el.parentElement;
-            const raw = parent && parent.getAttribute("data-fecha-int");
-            el.textContent = formatFechaInt(raw);
-        });
-        // Importes en EUR
-        root.querySelectorAll("[data-importe] .js-importe-formatted").forEach(function (el) {
-            const parent = el.parentElement;
-            const raw = parent && parent.getAttribute("data-importe");
-            el.textContent = formatImporteEur(raw);
-        });
-    }
-
-    applyFormattingPass(document);
-
-    // ---------- Selector de contrato (solo si hay >1) --------------------
+    // ---------- Selector de contrato (solo si hay >1 en el select) -------
     function wireContratoSelector() {
         const selector = document.getElementById("selected_contrato_codigo");
         if (!selector || selector.tagName !== "SELECT") {
@@ -83,13 +38,13 @@
     // ---------- Edición de líneas del albarán ---------------------------
     const dataTag = document.getElementById("document-data");
     if (!dataTag) {
-        // Vista por proveedor (read-only) → nada que hacer aquí.
+        // Vista por proveedor (read-only) → nada más que hacer aquí.
         return;
     }
 
-    let document_ = null;
+    let documentData = null;
     try {
-        document_ = JSON.parse(dataTag.textContent);
+        documentData = JSON.parse(dataTag.textContent);
     } catch (exc) {
         console.error("No se pudo parsear document-data JSON:", exc);
         return;
@@ -98,7 +53,7 @@
     const documentId =
         (dataTag.dataset && dataTag.dataset.documentId) ||
         window.reviewDocumentId ||
-        document_.id;
+        documentData.id;
 
     const linesBody = document.querySelector("#lines-table tbody");
     const addLineBtn = document.getElementById("add-line-btn");
@@ -161,7 +116,7 @@
         });
     }
 
-    renderLines(document_.lines);
+    renderLines(documentData.lines);
 
     if (addLineBtn) {
         addLineBtn.addEventListener("click", function () {

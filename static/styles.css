@@ -12,9 +12,7 @@
     --shadow: 0 8px 24px rgba(15, 23, 42, 0.08);
 }
 
-* {
-    box-sizing: border-box;
-}
+* { box-sizing: border-box; }
 
 body {
     margin: 0;
@@ -23,10 +21,7 @@ body {
     background: var(--bg);
 }
 
-.container {
-    width: min(1760px, calc(100% - 32px));
-    margin: 0 auto;
-}
+.container { width: min(1760px, calc(100% - 32px)); margin: 0 auto; }
 
 .topbar {
     position: sticky;
@@ -37,61 +32,20 @@ body {
     box-shadow: var(--shadow);
 }
 
-.topbar-inner {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    min-height: 64px;
-}
+.topbar-inner { display: flex; align-items: center; justify-content: space-between; min-height: 64px; }
+.brand { color: white; font-weight: 700; text-decoration: none; }
+.topnav { display: flex; gap: 16px; }
+.topnav a { color: #dbeafe; text-decoration: none; }
 
-.brand {
-    color: white;
-    font-weight: 700;
-    text-decoration: none;
-}
+.page-shell { padding: 24px 0 48px; }
 
-.topnav {
-    display: flex;
-    gap: 16px;
-}
+.page-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 24px; margin-bottom: 24px; }
+.page-header h1, .panel-header h2, .subsection-header h3 { margin: 0; }
 
-.topnav a {
-    color: #dbeafe;
-    text-decoration: none;
-}
+.muted { color: var(--muted); }
+.small { font-size: 0.85rem; }
 
-.page-shell {
-    padding: 24px 0 48px;
-}
-
-.page-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: flex-start;
-    gap: 24px;
-    margin-bottom: 24px;
-}
-
-.page-header h1,
-.panel-header h2,
-.subsection-header h3 {
-    margin: 0;
-}
-
-.muted {
-    color: var(--muted);
-}
-
-.small {
-    font-size: 0.85rem;
-}
-
-.alert {
-    border-radius: 12px;
-    padding: 14px 16px;
-    margin-bottom: 20px;
-}
-
+.alert { border-radius: 12px; padding: 14px 16px; margin-bottom: 20px; }
 .alert.success { background: #ecfdf5; color: #166534; border: 1px solid #bbf7d0; }
 .alert.warning { background: #fef3c7; color: #92400e; border: 1px solid #fcd34d; }
 .alert.info    { background: #dbeafe; color: #1e40af; border: 1px solid #93c5fd; }
@@ -105,42 +59,12 @@ body {
     margin-bottom: 24px;
 }
 
-.stats-grid {
-    display: grid;
-    grid-template-columns: repeat(4, minmax(140px, 1fr));
-    gap: 12px;
-    width: min(680px, 100%);
-}
+.stats-grid { display: grid; grid-template-columns: repeat(4, minmax(140px, 1fr)); gap: 12px; width: min(680px, 100%); }
+.stat-card { background: var(--panel); border: 1px solid var(--border); border-radius: 14px; padding: 14px; box-shadow: var(--shadow); }
+.stat-label { display: block; color: var(--muted); font-size: 0.85rem; margin-bottom: 8px; }
 
-.stat-card {
-    background: var(--panel);
-    border: 1px solid var(--border);
-    border-radius: 14px;
-    padding: 14px;
-    box-shadow: var(--shadow);
-}
-
-.stat-label {
-    display: block;
-    color: var(--muted);
-    font-size: 0.85rem;
-    margin-bottom: 8px;
-}
-
-.filters-grid {
-    display: grid;
-    grid-template-columns: repeat(6, minmax(120px, 1fr));
-    gap: 16px;
-    align-items: end;
-}
-
-.filters-grid label,
-.form-grid label {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    font-size: 0.95rem;
-}
+.filters-grid { display: grid; grid-template-columns: repeat(6, minmax(120px, 1fr)); gap: 16px; align-items: end; }
+.filters-grid label, .form-grid label { display: flex; flex-direction: column; gap: 8px; font-size: 0.95rem; }
 
 input, select, textarea, button { font: inherit; }
 
@@ -154,13 +78,7 @@ input, select, textarea {
 
 textarea { resize: vertical; }
 
-.filters-actions,
-.header-actions {
-    display: flex;
-    gap: 12px;
-    flex-wrap: wrap;
-    align-items: flex-end;
-}
+.filters-actions, .header-actions { display: flex; gap: 12px; flex-wrap: wrap; align-items: flex-end; }
 
 .btn {
     display: inline-flex;
@@ -184,27 +102,13 @@ textarea { resize: vertical; }
 
 .table-scroll { overflow-x: auto; }
 
-.table {
-    width: 100%;
-    border-collapse: collapse;
-}
-
-.table th, .table td {
-    border-bottom: 1px solid var(--border);
-    padding: 12px 10px;
-    vertical-align: top;
-    text-align: left;
-}
-
+.table { width: 100%; border-collapse: collapse; }
+.table th, .table td { border-bottom: 1px solid var(--border); padding: 12px 10px; vertical-align: top; text-align: left; }
 .table th a { color: var(--text); text-decoration: none; }
 
 .actions-cell { display: flex; gap: 8px; flex-wrap: wrap; }
 
-.empty-cell, .empty-state {
-    text-align: center;
-    color: var(--muted);
-    padding: 32px 16px;
-}
+.empty-cell, .empty-state { text-align: center; color: var(--muted); padding: 32px 16px; }
 
 .status-pill, .confidence-badge {
     display: inline-flex;
@@ -218,19 +122,9 @@ textarea { resize: vertical; }
 .status-pill.approved, .confidence-badge.ok   { background: #dcfce7; color: #166534; }
 .status-pill.pending, .confidence-badge.low   { background: #fef3c7; color: #92400e; }
 
-.link-strong {
-    color: var(--primary);
-    text-decoration: none;
-    font-weight: 600;
-}
+.link-strong { color: var(--primary); text-decoration: none; font-weight: 600; }
 
-.pagination {
-    display: flex;
-    justify-content: center;
-    align-items: center;
-    gap: 16px;
-    padding-top: 16px;
-}
+.pagination { display: flex; justify-content: center; align-items: center; gap: 16px; padding-top: 16px; }
 
 .split-layout {
     display: grid;
@@ -239,24 +133,10 @@ textarea { resize: vertical; }
     align-items: start;
 }
 
-.viewer-panel,
-.editor-panel {
-    min-height: 880px;
-}
+.viewer-panel, .editor-panel { min-height: 880px; }
+.viewer-panel { position: sticky; top: 88px; }
 
-.viewer-panel {
-    position: sticky;
-    top: 88px;
-}
-
-.panel-header,
-.subsection-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    gap: 12px;
-    margin-bottom: 16px;
-}
+.panel-header, .subsection-header { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 16px; }
 
 .document-frame {
     width: 100%;
@@ -267,20 +147,9 @@ textarea { resize: vertical; }
     background: white;
 }
 
-.viewer-meta {
-    display: grid;
-    gap: 8px;
-    margin-top: 16px;
-    color: var(--muted);
-    font-size: 0.92rem;
-}
+.viewer-meta { display: grid; gap: 8px; margin-top: 16px; color: var(--muted); font-size: 0.92rem; }
 
-.form-grid.two-columns {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(180px, 1fr));
-    gap: 16px;
-}
-
+.form-grid.two-columns { display: grid; grid-template-columns: repeat(2, minmax(180px, 1fr)); gap: 16px; }
 .full-width { grid-column: 1 / -1; }
 
 .provider-section { margin-top: 28px; }
@@ -293,26 +162,9 @@ textarea { resize: vertical; }
     background: #fafcff;
 }
 
-.provider-card summary {
-    cursor: pointer;
-    display: flex;
-    justify-content: space-between;
-    gap: 12px;
-}
-
-.provider-grid {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(180px, 1fr));
-    gap: 12px;
-    margin: 12px 0;
-}
-
-.provider-json-grid {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(260px, 1fr));
-    gap: 16px;
-}
-
+.provider-card summary { cursor: pointer; display: flex; justify-content: space-between; gap: 12px; }
+.provider-grid { display: grid; grid-template-columns: repeat(2, minmax(180px, 1fr)); gap: 12px; margin: 12px 0; }
+.provider-json-grid { display: grid; grid-template-columns: repeat(2, minmax(260px, 1fr)); gap: 16px; }
 .provider-json-grid pre {
     margin: 0;
     max-height: 320px;
@@ -336,19 +188,8 @@ textarea { resize: vertical; }
 /* ============================================================== */
 /*  Selector de fuente (merge / openai / gemini / claude)         */
 /* ============================================================== */
-.view-switcher {
-    display: inline-flex;
-    align-items: flex-end;
-    margin: 0;
-}
-
-.view-switcher label {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    font-size: 0.95rem;
-}
-
+.view-switcher { display: inline-flex; align-items: flex-end; margin: 0; }
+.view-switcher label { display: flex; flex-direction: column; gap: 4px; font-size: 0.95rem; }
 .view-switcher select {
     min-width: 220px;
     padding: 10px 12px;
@@ -359,31 +200,15 @@ textarea { resize: vertical; }
     cursor: pointer;
 }
 
-.readonly-grid {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(180px, 1fr));
-    gap: 12px 16px;
-    margin: 0 0 24px;
-}
-
+.readonly-grid { display: grid; grid-template-columns: repeat(2, minmax(180px, 1fr)); gap: 12px 16px; margin: 0 0 24px; }
 .readonly-grid > div {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
+    display: flex; flex-direction: column; gap: 4px;
     padding: 10px 12px;
     border: 1px solid var(--border);
     border-radius: 10px;
     background: #fafcff;
 }
-
-.readonly-grid dt {
-    margin: 0;
-    font-size: 0.82rem;
-    color: var(--muted);
-    text-transform: uppercase;
-    letter-spacing: 0.03em;
-}
-
+.readonly-grid dt { margin: 0; font-size: 0.82rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.03em; }
 .readonly-grid dd { margin: 0; font-weight: 500; word-break: break-word; }
 
 /* ============================================================== */
@@ -395,9 +220,7 @@ textarea { resize: vertical; }
     border-bottom: 2px solid var(--border);
 }
 
-.contrato-empty {
-    margin-top: 0;
-}
+.contrato-empty { margin-top: 0; }
 
 .contrato-card {
     border: 1px solid var(--border);
@@ -405,13 +228,27 @@ textarea { resize: vertical; }
     padding: 16px;
     background: #fafcff;
     margin-top: 8px;
+    /* Sin overflow aquí: el scroll vive en .contrato-scroll */
+}
+
+/* Wrapper con scroll horizontal cuando el grid no cabe en el panel.
+   El min-width del grid fuerza el tamaño lógico; si el panel es más
+   estrecho, aparece scrollbar en este contenedor. */
+.contrato-scroll {
+    overflow-x: auto;
+    padding-bottom: 6px; /* espacio para que el scrollbar no tape la última fila */
 }
 
 .contrato-grid {
     display: grid;
-    grid-template-columns: minmax(160px, 0.8fr) minmax(260px, 2fr) minmax(140px, 0.9fr) minmax(170px, 1fr);
-    gap: 16px 20px;
+    grid-template-columns:
+        minmax(140px, max-content)   /* Código */
+        minmax(280px, 1.6fr)         /* Nombre (flexible, puede estirarse) */
+        minmax(140px, max-content)   /* Fecha */
+        minmax(170px, max-content);  /* Importe */
+    gap: 16px 28px;
     align-items: start;
+    min-width: 760px;
 }
 
 .contrato-grid > div {
@@ -434,6 +271,7 @@ textarea { resize: vertical; }
     margin: 0;
     font-weight: 500;
     word-break: break-word;
+    white-space: normal;
 }
 
 .contrato-grid dd code {
@@ -445,17 +283,17 @@ textarea { resize: vertical; }
     font-size: 0.92em;
 }
 
-/* Columna Nombre ocupa más espacio si hace falta */
-.contrato-grid .contrato-nombre dd {
-    font-weight: 600;
-}
+.contrato-grid .contrato-nombre dd { font-weight: 600; }
 
 .contrato-multi { display: flex; flex-direction: column; gap: 12px; }
+.contrato-select { background: white; cursor: pointer; }
 
-.contrato-select {
-    background: white;
-    cursor: pointer;
-}
+/* Barra de scroll más visible en la card (Webkit). Firefox usa la
+   estándar del SO, no hace falta config. */
+.contrato-scroll::-webkit-scrollbar { height: 8px; }
+.contrato-scroll::-webkit-scrollbar-track { background: #eef2ff; border-radius: 4px; }
+.contrato-scroll::-webkit-scrollbar-thumb { background: #94a3b8; border-radius: 4px; }
+.contrato-scroll::-webkit-scrollbar-thumb:hover { background: #64748b; }
 
 /* ============================================================== */
 /*  Responsive                                                     */
@@ -467,7 +305,8 @@ textarea { resize: vertical; }
     .provider-grid, .provider-json-grid, .readonly-grid {
         grid-template-columns: 1fr 1fr;
     }
-    .contrato-grid { grid-template-columns: 1fr 1fr; }
+    /* El grid de contrato NO colapsa — lo dejamos en su min-width y
+       que el scroll horizontal cumpla su función. */
 }
 
 @media (max-width: 820px) {
@@ -476,8 +315,7 @@ textarea { resize: vertical; }
         align-items: stretch;
     }
     .stats-grid, .filters-grid, .form-grid.two-columns,
-    .provider-grid, .provider-json-grid, .readonly-grid,
-    .contrato-grid {
+    .provider-grid, .provider-json-grid, .readonly-grid {
         grid-template-columns: 1fr;
     }
     .container { width: min(100% - 20px, 1440px); }
