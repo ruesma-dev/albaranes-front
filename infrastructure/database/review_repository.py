@@ -23,6 +23,7 @@ from domain.models.review_models import (
     normalize_view_mode,
 )
 from infrastructure.database.orm_models import (
+    AlbaranContratoLineMergeOrm,
     AlbaranContratoMergeOrm,
     AlbaranDocumentBaseOrm,
     AlbaranDocumentMergeOrm,
@@ -89,8 +90,46 @@ class AlbaranReviewRepository:
             "ALTER TABLE albaran_documents_merge ADD COLUMN IF NOT EXISTS reviewed_at_utc VARCHAR(64)",
             "ALTER TABLE albaran_documents_merge ADD COLUMN IF NOT EXISTS last_modified_at_utc VARCHAR(64)",
             "ALTER TABLE albaran_documents_merge ADD COLUMN IF NOT EXISTS review_notes TEXT",
-            # Nueva columna: contrato seleccionado (ref. soft, no FK).
+            # Contrato seleccionado (ref. soft, no FK).
             "ALTER TABLE albaran_documents_merge ADD COLUMN IF NOT EXISTS selected_contrato_codigo VARCHAR(64)",
+            # Tabla nueva: líneas de detalle de los contratos.
+            # Se crea DESPUÉS de albaran_contratos_merge (que el servicio 3
+            # ya crea); si el servicio 4 arranca antes y la tabla padre no
+            # existe, este CREATE fallará — pero el guard de _tables_ready()
+            # impide llegar hasta aquí en ese escenario.
+            """
+            CREATE TABLE IF NOT EXISTS albaran_contrato_lines_merge (
+                id                     SERIAL PRIMARY KEY,
+                contrato_id            INTEGER NOT NULL
+                    REFERENCES albaran_contratos_merge(id) ON DELETE CASCADE,
+                codigo_contrato        VARCHAR(64) NOT NULL,
+                linea                  INTEGER,
+                numero_linea           INTEGER,
+                codigo_producto        VARCHAR(64),
+                codigo_alternativo     VARCHAR(64),
+                unidad_medida          VARCHAR(32),
+                descripcion_linea      TEXT,
+                uds                    DOUBLE PRECISION,
+                cantidad_servida       DOUBLE PRECISION,
+                cantidad_facturada     DOUBLE PRECISION,
+                pendiente_servir       DOUBLE PRECISION,
+                precio_unitario        DOUBLE PRECISION,
+                precio_bruto           DOUBLE PRECISION,
+                descuentos             DOUBLE PRECISION,
+                importe_linea          DOUBLE PRECISION,
+                cuota_iva              DOUBLE PRECISION,
+                doc_origen             VARCHAR(64),
+                fetched_at_utc         VARCHAR(64) NOT NULL
+            )
+            """,
+            (
+                "CREATE INDEX IF NOT EXISTS ix_albaran_contrato_lines_merge_contrato_id "
+                "ON albaran_contrato_lines_merge (contrato_id)"
+            ),
+            (
+                "CREATE INDEX IF NOT EXISTS ix_albaran_contrato_lines_merge_codigo "
+                "ON albaran_contrato_lines_merge (codigo_contrato)"
+            ),
             (
                 "CREATE INDEX IF NOT EXISTS ix_albaran_documents_merge_approved "
                 "ON albaran_documents_merge (approved)"
@@ -377,8 +416,8 @@ class AlbaranReviewRepository:
     # Re-fetch manual de contratos desde el portal.
     # Usado por ContratoRefetchService para:
     #   1) Leer el (cif, obra) actuales del merge.
-    #   2) Tras llamar a Sigrid, reemplazar atómicamente los contratos
-    #      guardados y fijar selected_contrato_codigo en un solo paso.
+    #   2) Tras llamar a Sigrid, reemplazar atómicamente cabeceras +
+    #      líneas y fijar selected_contrato_codigo en un solo paso.
     # Deliberadamente NO toca reviewed_at_utc ni last_modified_at_utc
     # porque esto es un enriquecimiento automático, no una edición
     # humana (auditoría intacta).
@@ -388,12 +427,7 @@ class AlbaranReviewRepository:
         *,
         document_id: str,
     ) -> tuple[str | None, str | None]:
-        """Devuelve (proveedor_cif, obra_codigo) del merge doc.
-
-        Devuelve (None, None) si el documento no existe. No lanza excepción
-        porque el endpoint ya valida la existencia del doc antes; aquí solo
-        leemos valores.
-        """
+        """Devuelve (proveedor_cif, obra_codigo) del merge doc."""
         self.initialize()
         with self._session_factory.create_session() as session:
             document = session.get(AlbaranDocumentMergeOrm, document_id)
@@ -408,13 +442,16 @@ class AlbaranReviewRepository:
         contratos: list[ContratoFromSigrid],
         selected_codigo: str | None,
     ) -> None:
-        """Reemplaza los contratos del documento e inserta la selección.
+        """Reemplaza cabeceras + líneas y fija selected_contrato_codigo.
 
-        Flujo transaccional:
-          1) DELETE de todos los contratos previos del documento.
-          2) INSERT de los recibidos de Sigrid.
-          3) UPDATE del selected_contrato_codigo (0 ó 1 código).
-        Si algo casca, el commit no se ejecuta y queda como estaba.
+        Flujo transaccional (una sola transacción, commit al final):
+          1) Verifica que el merge doc existe.
+          2) DELETE de cabeceras previas del documento. Las líneas
+             asociadas caen por ON DELETE CASCADE de la FK.
+          3) INSERT de cabeceras nuevas. Tras cada ``session.flush()``,
+             ``header_orm.id`` queda asignado → insertamos sus líneas
+             con el FK correcto.
+          4) UPDATE del selected_contrato_codigo en el doc merge.
         """
         self.initialize()
         now = datetime.now(timezone.utc).isoformat()
@@ -431,23 +468,48 @@ class AlbaranReviewRepository:
             session.flush()
 
             for contrato in contratos:
-                session.add(
-                    AlbaranContratoMergeOrm(
-                        document_id=document_id,
-                        codigo_contrato=contrato.codigo_contrato,
-                        nombre_contrato=contrato.nombre_contrato,
-                        fecha_alta_contrato=contrato.fecha_alta_contrato,
-                        fecha_contrato=contrato.fecha_contrato,
-                        vigencia_desde=contrato.vigencia_desde,
-                        vigencia_hasta=contrato.vigencia_hasta,
-                        importe_total=contrato.importe_total,
-                        cif_proveedor=contrato.cif_proveedor,
-                        nombre_proveedor=contrato.nombre_proveedor,
-                        codigo_obra=contrato.codigo_obra,
-                        nombre_obra=contrato.nombre_obra,
-                        fetched_at_utc=now,
-                    )
+                header_orm = AlbaranContratoMergeOrm(
+                    document_id=document_id,
+                    codigo_contrato=contrato.codigo_contrato,
+                    nombre_contrato=contrato.nombre_contrato,
+                    fecha_alta_contrato=contrato.fecha_alta_contrato,
+                    fecha_contrato=contrato.fecha_contrato,
+                    vigencia_desde=contrato.vigencia_desde,
+                    vigencia_hasta=contrato.vigencia_hasta,
+                    importe_total=contrato.importe_total,
+                    cif_proveedor=contrato.cif_proveedor,
+                    nombre_proveedor=contrato.nombre_proveedor,
+                    codigo_obra=contrato.codigo_obra,
+                    nombre_obra=contrato.nombre_obra,
+                    fetched_at_utc=now,
                 )
+                session.add(header_orm)
+                session.flush()  # asigna header_orm.id para las líneas
+
+                for line in (contrato.lines or []):
+                    session.add(
+                        AlbaranContratoLineMergeOrm(
+                            contrato_id=header_orm.id,
+                            codigo_contrato=contrato.codigo_contrato,
+                            linea=line.linea,
+                            numero_linea=line.numero_linea,
+                            codigo_producto=line.codigo_producto,
+                            codigo_alternativo=line.codigo_alternativo,
+                            unidad_medida=line.unidad_medida,
+                            descripcion_linea=line.descripcion_linea,
+                            uds=line.uds,
+                            cantidad_servida=line.cantidad_servida,
+                            cantidad_facturada=line.cantidad_facturada,
+                            pendiente_servir=line.pendiente_servir,
+                            precio_unitario=line.precio_unitario,
+                            precio_bruto=line.precio_bruto,
+                            descuentos=line.descuentos,
+                            importe_linea=line.importe_linea,
+                            cuota_iva=line.cuota_iva,
+                            doc_origen=line.doc_origen,
+                            fetched_at_utc=now,
+                        )
+                    )
 
             session.execute(
                 text(

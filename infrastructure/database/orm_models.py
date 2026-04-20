@@ -137,6 +137,48 @@ class AlbaranContratoMergeOrm(Base):
     document: Mapped[AlbaranDocumentMergeOrm] = relationship(back_populates="contratos")
 
 
+class AlbaranContratoLineMergeOrm(Base):
+    """Líneas de detalle (``ctrpro``) de un contrato de cabecera.
+
+    Poblada por el enrichment (servicios 3 y 4) a partir de la query
+    ampliada a Sigrid. Desde el servicio 4 es read/write (el re-fetch
+    manual inserta aquí), pero el servicio 4 NO consume estas líneas
+    en ninguna vista todavía — quedan almacenadas para uso futuro
+    (comparación contrato vs albarán, por ejemplo).
+
+    Cascada: ``ondelete="CASCADE"`` a nivel BBDD → al borrar la
+    cabecera del contrato, las líneas caen solas sin lógica aplicativa.
+    """
+
+    __tablename__ = "albaran_contrato_lines_merge"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    contrato_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("albaran_contratos_merge.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    codigo_contrato: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    linea: Mapped[int | None] = mapped_column(Integer)
+    numero_linea: Mapped[int | None] = mapped_column(Integer)
+    codigo_producto: Mapped[str | None] = mapped_column(String(64))
+    codigo_alternativo: Mapped[str | None] = mapped_column(String(64))
+    unidad_medida: Mapped[str | None] = mapped_column(String(32))
+    descripcion_linea: Mapped[str | None] = mapped_column(Text)
+    uds: Mapped[float | None] = mapped_column(Float)
+    cantidad_servida: Mapped[float | None] = mapped_column(Float)
+    cantidad_facturada: Mapped[float | None] = mapped_column(Float)
+    pendiente_servir: Mapped[float | None] = mapped_column(Float)
+    precio_unitario: Mapped[float | None] = mapped_column(Float)
+    precio_bruto: Mapped[float | None] = mapped_column(Float)
+    descuentos: Mapped[float | None] = mapped_column(Float)
+    importe_linea: Mapped[float | None] = mapped_column(Float)
+    cuota_iva: Mapped[float | None] = mapped_column(Float)
+    doc_origen: Mapped[str | None] = mapped_column(String(64))
+    fetched_at_utc: Mapped[str] = mapped_column(String(64), nullable=False)
+
+
 class AlbaranDocumentBaseOrm(Base):
     __tablename__ = "albaran_documents"
 
