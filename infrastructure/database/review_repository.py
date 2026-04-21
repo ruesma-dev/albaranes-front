@@ -90,14 +90,16 @@ class AlbaranReviewRepository:
             "ALTER TABLE albaran_documents_merge ADD COLUMN IF NOT EXISTS reviewed_at_utc VARCHAR(64)",
             "ALTER TABLE albaran_documents_merge ADD COLUMN IF NOT EXISTS last_modified_at_utc VARCHAR(64)",
             "ALTER TABLE albaran_documents_merge ADD COLUMN IF NOT EXISTS review_notes TEXT",
-            # Contrato seleccionado (ref. soft, no FK).
             "ALTER TABLE albaran_documents_merge ADD COLUMN IF NOT EXISTS selected_contrato_codigo VARCHAR(64)",
-            # Columna nueva en cabecera de contrato: id del PDF en ruesma_rep.gra.
-            # La tabla albaran_contratos_merge la crea el servicio 3; esta ALTER
-            # es idempotente y solo tiene efecto si la tabla ya existe.
             "ALTER TABLE albaran_contratos_merge ADD COLUMN IF NOT EXISTS gra_rep_ide INTEGER",
-            # Tabla de líneas de contrato (la crea quien llegue primero:
-            # servicio 3 via ORM o servicio 4 via este DDL).
+            (
+                "ALTER TABLE albaran_contratos_merge "
+                "ADD COLUMN IF NOT EXISTS pdf_sharepoint_relative_path VARCHAR(1024)"
+            ),
+            (
+                "ALTER TABLE albaran_contratos_merge "
+                "ADD COLUMN IF NOT EXISTS pdf_sharepoint_web_url VARCHAR(1024)"
+            ),
             """
             CREATE TABLE IF NOT EXISTS albaran_contrato_lines_merge (
                 id                     SERIAL PRIMARY KEY,
@@ -125,7 +127,6 @@ class AlbaranReviewRepository:
                 fetched_at_utc         VARCHAR(64) NOT NULL
             )
             """,
-            # ALTERs defensivos por si la tabla ya existía con un esquema viejo.
             (
                 "ALTER TABLE albaran_contrato_lines_merge "
                 "ADD COLUMN IF NOT EXISTS codigo_partida VARCHAR(64)"
@@ -244,6 +245,12 @@ class AlbaranReviewRepository:
                     nombre_proveedor=item.nombre_proveedor,
                     codigo_obra=item.codigo_obra,
                     nombre_obra=item.nombre_obra,
+                    pdf_sharepoint_relative_path=getattr(
+                        item, "pdf_sharepoint_relative_path", None
+                    ),
+                    pdf_sharepoint_web_url=getattr(
+                        item, "pdf_sharepoint_web_url", None
+                    ),
                 )
                 for item in contratos_orm
             ]
@@ -424,9 +431,6 @@ class AlbaranReviewRepository:
             selected_contrato_codigo=selected_contrato_codigo,
         )
 
-    # ================================================================== #
-    # Re-fetch manual de contratos desde el portal.
-    # ================================================================== #
     def get_merge_cif_and_obra(
         self,
         *,
@@ -439,6 +443,26 @@ class AlbaranReviewRepository:
                 return None, None
             return document.proveedor_cif, document.obra_codigo
 
+    def get_existing_pdf_paths(
+        self,
+        *,
+        document_id: str,
+    ) -> dict[str, tuple[int | None, str | None, str | None]]:
+        self.initialize()
+        result: dict[str, tuple[int | None, str | None, str | None]] = {}
+        with self._session_factory.create_session() as session:
+            rows = session.execute(
+                select(
+                    AlbaranContratoMergeOrm.codigo_contrato,
+                    AlbaranContratoMergeOrm.gra_rep_ide,
+                    AlbaranContratoMergeOrm.pdf_sharepoint_relative_path,
+                    AlbaranContratoMergeOrm.pdf_sharepoint_web_url,
+                ).where(AlbaranContratoMergeOrm.document_id == document_id)
+            ).all()
+            for codigo, ide, rel_path, web_url in rows:
+                result[codigo] = (ide, rel_path, web_url)
+        return result
+
     def replace_contratos_and_select(
         self,
         *,
@@ -446,12 +470,6 @@ class AlbaranReviewRepository:
         contratos: list[ContratoFromSigrid],
         selected_codigo: str | None,
     ) -> None:
-        """Reemplaza cabeceras + líneas y fija selected_contrato_codigo.
-
-        Persiste ``gra_rep_ide`` en la cabecera y ``codigo_partida`` +
-        ``descripcion_partida`` en cada línea. Todo en una sola
-        transacción.
-        """
         self.initialize()
         now = datetime.now(timezone.utc).isoformat()
         with self._session_factory.create_session() as session:
@@ -466,7 +484,6 @@ class AlbaranReviewRepository:
             )
             session.flush()
 
-            total_lines_inserted = 0
             for contrato in contratos:
                 header_orm = AlbaranContratoMergeOrm(
                     document_id=document_id,
@@ -482,10 +499,12 @@ class AlbaranReviewRepository:
                     codigo_obra=contrato.codigo_obra,
                     nombre_obra=contrato.nombre_obra,
                     gra_rep_ide=contrato.gra_rep_ide,
+                    pdf_sharepoint_relative_path=contrato.pdf_sharepoint_relative_path,
+                    pdf_sharepoint_web_url=contrato.pdf_sharepoint_web_url,
                     fetched_at_utc=now,
                 )
                 session.add(header_orm)
-                session.flush()  # asigna header_orm.id
+                session.flush()
 
                 for line in (contrato.lines or []):
                     session.add(
@@ -513,7 +532,6 @@ class AlbaranReviewRepository:
                             fetched_at_utc=now,
                         )
                     )
-                    total_lines_inserted += 1
 
             session.execute(
                 text(
@@ -524,6 +542,33 @@ class AlbaranReviewRepository:
                 {"codigo": selected_codigo, "doc_id": document_id},
             )
 
+            session.commit()
+
+    def update_contrato_pdf_paths(
+        self,
+        *,
+        document_id: str,
+        codigo_contrato: str,
+        relative_path: str | None,
+        web_url: str | None,
+    ) -> None:
+        self.initialize()
+        with self._session_factory.create_session() as session:
+            session.execute(
+                text(
+                    "UPDATE albaran_contratos_merge "
+                    "SET pdf_sharepoint_relative_path = :rel, "
+                    "    pdf_sharepoint_web_url = :url "
+                    "WHERE document_id = :doc_id "
+                    "  AND codigo_contrato = :codigo"
+                ),
+                {
+                    "rel": relative_path,
+                    "url": web_url,
+                    "doc_id": document_id,
+                    "codigo": codigo_contrato,
+                },
+            )
             session.commit()
 
     def update_document(

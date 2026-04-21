@@ -109,6 +109,14 @@ class ContratoPayload(BaseModel):
     Los tipos numéricos ``fecha_*`` vienen como INT YYYYMMDD (p.e.
     20241122) — la capa de presentación los formatea a DD/MM/YYYY. Un
     valor de ``0`` en vigencia significa "sin vigencia establecida".
+
+    ``pdf_sharepoint_relative_path`` y ``pdf_sharepoint_web_url`` son
+    la ubicación del PDF del contrato ya descargado de Sigrid y subido
+    a SharePoint por el enrichment (servicio 3 automáticamente, o
+    servicio 4 durante un re-fetch manual). Ambos pueden ser ``None``
+    si el contrato no tiene PDF vinculado en el ERP, o si todavía no
+    se ha subido. El portal usa ``pdf_sharepoint_web_url`` para pintar
+    el botón 'Abrir contrato' en la vista de detalle del albarán.
     """
 
     id: int
@@ -123,6 +131,8 @@ class ContratoPayload(BaseModel):
     nombre_proveedor: str | None = None
     codigo_obra: str | None = None
     nombre_obra: str | None = None
+    pdf_sharepoint_relative_path: str | None = None
+    pdf_sharepoint_web_url: str | None = None
 
 
 class MergeDocumentUpdatePayload(BaseModel):

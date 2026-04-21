@@ -6,14 +6,8 @@ from dataclasses import dataclass, field
 
 @dataclass(frozen=True)
 class ContratoLineFromSigrid:
-    """Línea de detalle (``ctrpro``) de un contrato del ERP.
-
-    Incluye los datos de la partida a la que se imputa la línea
-    (``obrparpar``).
-
-    Réplica del mismo modelo en el servicio 3. Duplicación intencional:
-    son dos microservicios distintos y compartir código exigiría una
-    librería interna que aún no merece la pena.
+    """Línea de detalle de un contrato del ERP. Réplica simétrica del
+    servicio 3 (duplicación consciente entre microservicios).
     """
 
     codigo_contrato: str
@@ -39,19 +33,12 @@ class ContratoLineFromSigrid:
 
 @dataclass(frozen=True)
 class ContratoFromSigrid:
-    """Contrato devuelto por Sigrid (cabecera + líneas + PDF).
+    """Contrato devuelto por Sigrid (cabecera + líneas + PDF ref).
 
-    El cliente HTTP:
-      - Pide cabecera + líneas (con partida) en un solo resultset,
-        agrupa en memoria por ``codigo_contrato``.
-      - Pide documentos vinculados (ruesma.rcg + ruesma.gra) y por
-        cada PDF resuelve ``ruesma_rep.gra.ide`` para tenerlo listo
-        para descarga futura.
-
-    ``importe_total`` = ``ctr.totbas`` (importe SIN IVA).
-    ``gra_rep_ide`` = id del PDF principal del contrato en la BBDD
-    réplica ``ruesma_rep``. ``None`` si el contrato no tiene PDF
-    vinculado.
+    ``importe_total`` = ``ctr.totbas`` (SIN IVA).
+    ``gra_rep_ide`` = id del PDF en ``ruesma_rep.gra``.
+    ``pdf_sharepoint_*`` se rellenan tras la descarga+subida del PDF
+    (o se inyectan desde el estado previo en caso de reutilización).
     """
 
     codigo_contrato: str
@@ -60,10 +47,12 @@ class ContratoFromSigrid:
     fecha_contrato: int | None
     vigencia_desde: int | None
     vigencia_hasta: int | None
-    importe_total: float | None  # ctr.totbas (sin IVA)
+    importe_total: float | None
     cif_proveedor: str | None
     nombre_proveedor: str | None
     codigo_obra: str | None
     nombre_obra: str | None
     gra_rep_ide: int | None
+    pdf_sharepoint_relative_path: str | None = None
+    pdf_sharepoint_web_url: str | None = None
     lines: list[ContratoLineFromSigrid] = field(default_factory=list)

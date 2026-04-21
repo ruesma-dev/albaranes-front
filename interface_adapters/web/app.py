@@ -30,6 +30,9 @@ from infrastructure.database.review_repository import AlbaranReviewRepository
 from infrastructure.database.session_factory import SessionFactory
 from infrastructure.graph.token_provider import GraphTokenProvider
 from infrastructure.sigrid.sigrid_api_contrato_client import SigridApiContratoClient
+from infrastructure.storage.sharepoint_contrato_pdf_storage import (
+    SharePointContratoPdfStorage,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +83,80 @@ def _format_importe_eur(value: Any) -> str:
     return f"{formatted} €"
 
 
+def _build_contrato_pdf_storage(
+    settings: Settings,
+) -> SharePointContratoPdfStorage | None:
+    """Construye el storage de PDFs de contrato reutilizando las MISMAS
+    variables que el servicio 3 (``SHAREPOINT_*``).
+
+    Devuelve None si no hay ``graph_key`` o faltan settings clave para
+    el modo configurado. El ContratoRefetchService se construirá sin
+    pdf_storage y se saltará la descarga/subida de PDFs.
+    """
+    graph_key = getattr(settings, "graph_key", None)
+    if not graph_key:
+        logger.warning(
+            "[contrato-pdf][wiring] GRAPH_KEY vacío; no se subirán PDFs "
+            "de contrato tras el re-fetch."
+        )
+        return None
+
+    mode = str(getattr(settings, "sharepoint_mode", "drive_id") or "drive_id")
+    drive_id = getattr(settings, "sharepoint_drive_id", None)
+    folder_url = getattr(settings, "sharepoint_folder_url", None)
+    hostname = getattr(settings, "sharepoint_hostname", None)
+    site_path = getattr(settings, "sharepoint_site_path", None)
+
+    if mode == "drive_id" and not drive_id:
+        logger.warning(
+            "[contrato-pdf][wiring] SHAREPOINT_MODE=drive_id pero falta "
+            "SHAREPOINT_DRIVE_ID; no se subirán PDFs de contrato."
+        )
+        return None
+    if mode == "folder_url" and not folder_url:
+        logger.warning(
+            "[contrato-pdf][wiring] SHAREPOINT_MODE=folder_url pero falta "
+            "SHAREPOINT_FOLDER_URL; no se subirán PDFs de contrato."
+        )
+        return None
+    if mode == "site_path" and (not hostname or not site_path):
+        logger.warning(
+            "[contrato-pdf][wiring] SHAREPOINT_MODE=site_path pero faltan "
+            "SHAREPOINT_HOSTNAME/SHAREPOINT_SITE_PATH; no se subirán PDFs."
+        )
+        return None
+
+    try:
+        storage = SharePointContratoPdfStorage(
+            graph_key=graph_key,
+            timeout_s=int(getattr(settings, "graph_timeout_s", 30) or 30),
+            mode=mode,  # type: ignore[arg-type]
+            hostname=hostname,
+            site_path=site_path,
+            drive_name=str(
+                getattr(settings, "sharepoint_drive_name", "Documentos") or "Documentos"
+            ),
+            drive_id=drive_id,
+            folder_root=str(
+                getattr(settings, "sharepoint_folder_root", "albaranes")
+                or "albaranes"
+            ),
+            folder_url=folder_url,
+        )
+    except Exception:
+        logger.exception(
+            "[contrato-pdf][wiring] ERROR construyendo "
+            "SharePointContratoPdfStorage; no se subirán PDFs de contrato."
+        )
+        return None
+
+    logger.info(
+        "[contrato-pdf][wiring] SharePointContratoPdfStorage ACTIVADO mode=%s",
+        mode,
+    )
+    return storage
+
+
 def build_app(settings: Settings) -> FastAPI:
     session_factory = SessionFactory(
         database_url=settings.database_url,
@@ -108,7 +185,13 @@ def build_app(settings: Settings) -> FastAPI:
     # Wiring del servicio de re-fetch manual de contratos desde el portal.
     # Requiere las credenciales SIGRID_API_* en .env / Settings.
     # Si faltan, queda None y el endpoint devuelve 503.
+    #
+    # El SharePointContratoPdfStorage se intenta construir siempre que
+    # haya credenciales de Graph, INDEPENDIENTEMENTE de que haya Sigrid
+    # o no (aunque solo se usa cuando el refetch service está activo).
     # ------------------------------------------------------------------ #
+    contrato_pdf_storage = _build_contrato_pdf_storage(settings)
+
     contrato_refetch_service: ContratoRefetchService | None = None
     sigrid_base = getattr(settings, "sigrid_api_base_url", None)
     sigrid_key = getattr(settings, "sigrid_api_function_key", None)
@@ -124,13 +207,15 @@ def build_app(settings: Settings) -> FastAPI:
         contrato_refetch_service = ContratoRefetchService(
             client=sigrid_client,
             repository=repository,
+            pdf_storage=contrato_pdf_storage,
             enabled=True,
         )
         logger.info(
             "[contrato-refetch][wiring] ContratoRefetchService ACTIVADO "
-            "contra %s db=%s",
+            "contra %s db=%s pdf_storage=%s",
             sigrid_base,
             sigrid_db,
+            "PRESENTE" if contrato_pdf_storage is not None else "None",
         )
     else:
         logger.warning(
@@ -139,6 +224,7 @@ def build_app(settings: Settings) -> FastAPI:
             "El endpoint POST /api/documents/{id}/re-fetch-contratos devolverá 503."
         )
     app.state.contrato_refetch_service = contrato_refetch_service
+    app.state.contrato_pdf_storage = contrato_pdf_storage
 
     templates = Jinja2Templates(
         directory=str(Path(__file__).resolve().parents[2] / "templates")
@@ -172,6 +258,7 @@ def build_app(settings: Settings) -> FastAPI:
                 "max_page_size": settings.max_page_size,
                 "preview_enabled": settings.preview_enabled,
                 "contrato_refetch_wired": contrato_refetch_service is not None,
+                "contrato_pdf_storage_wired": contrato_pdf_storage is not None,
             },
         )
 

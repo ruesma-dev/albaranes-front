@@ -128,9 +128,17 @@ textarea { resize: vertical; }
 
 .pagination { display: flex; justify-content: center; align-items: center; gap: 16px; padding-top: 16px; }
 
+/* ==============================================================
+   SPLIT LAYOUT (detalle)
+   --------------------------------------------------------------
+   Visor a la izquierda, editor a la derecha. Con navpanes=0 en el
+   iframe el visor PDF del navegador ya no pinta el panel de
+   miniaturas interno, así que el panel puede volver a un ancho
+   razonable para leer el albarán cómodamente.
+   ============================================================== */
 .split-layout {
     display: grid;
-    grid-template-columns: minmax(760px, 1.45fr) minmax(560px, 1fr);
+    grid-template-columns: minmax(560px, 1.2fr) minmax(520px, 1fr);
     gap: 24px;
     align-items: start;
 }
@@ -224,8 +232,6 @@ textarea { resize: vertical; }
 
 .contrato-empty { margin-top: 0; }
 
-/* Texto + botonera del alert de "0 contratos". El alert.warning da el
-   fondo amarillo, estas reglas solo organizan el contenido interno. */
 .contrato-empty-text { margin-bottom: 10px; }
 
 .contrato-empty-actions {
@@ -243,9 +249,6 @@ textarea { resize: vertical; }
     margin-left: 4px;
 }
 
-/* Dentro del alert.warning los botones .btn.success/.secondary se ven
-   bien por defecto, pero su borde queda un poco diluido; forzamos uno
-   más contrastado para que destaquen sobre el amarillo. */
 .contrato-empty-actions .btn.success {
     box-shadow: 0 1px 0 rgba(0, 0, 0, 0.12);
 }
@@ -254,7 +257,6 @@ textarea { resize: vertical; }
     color: #7c2d12;
 }
 
-/* Zona de feedback después de pulsar los botones de re-fetch. */
 .refetch-status {
     margin-top: 10px;
     padding: 10px 12px;
@@ -350,6 +352,24 @@ textarea { resize: vertical; }
 .contrato-scroll::-webkit-scrollbar-track { background: #eef2ff; border-radius: 4px; }
 .contrato-scroll::-webkit-scrollbar-thumb { background: #94a3b8; border-radius: 4px; }
 .contrato-scroll::-webkit-scrollbar-thumb:hover { background: #64748b; }
+
+/* Aviso de 'sin PDF' dentro de la tarjeta del contrato.
+   El botón de abrir PDF ahora vive en la cabecera del detalle, no
+   dentro de esta tarjeta — solo mantenemos aquí el aviso cuando
+   el contrato no tiene PDF asociado para no confundir al usuario. */
+.contrato-actions {
+    margin-top: 14px;
+    padding-top: 12px;
+    border-top: 1px solid var(--border);
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    align-items: center;
+}
+
+.contrato-no-pdf {
+    font-style: italic;
+}
 
 /* ============================================================== */
 /*  Responsive                                                     */

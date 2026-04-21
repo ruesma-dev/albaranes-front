@@ -1,7 +1,8 @@
 // static/app.js
 //
 // Portal de revisión — interacciones del detalle editable:
-//   - Selector de contrato cuando hay varios.
+//   - Selector de contrato cuando hay varios (y sincronía con el botón
+//     "Abrir contrato en SharePoint" de la cabecera).
 //   - Edición inline de líneas.
 //   - Guardar/Aprobar contra PUT /api/documents/{id}.
 //   - Botones "Guardar y volver a buscar" / "Solo volver a buscar"
@@ -15,18 +16,89 @@
     "use strict";
 
     // --------------------------------------------------------------- //
-    // Selector de contrato cuando hay varios (muestra la card elegida).
+    // Mapa { codigo_contrato: pdf_sharepoint_web_url | null } construido
+    // a partir de la lista de pares [codigo, url] emitida por el template
+    // cuando hay varios contratos (Jinja2 no soporta dict-comprehensions,
+    // de ahí la indirección). Se usa para cambiar el href del botón
+    // "Abrir contrato en SharePoint" de la cabecera cuando el usuario
+    // cambia la selección del desplegable. Si hay 0 o 1 contratos el
+    // script-tag no se emite y pdfMap queda vacío.
+    // --------------------------------------------------------------- //
+    let contratosPdfMap = {};
+    const pdfMapTag = document.getElementById("contratos-pdf-map");
+    if (pdfMapTag) {
+        try {
+            const pairs = JSON.parse(pdfMapTag.textContent) || [];
+            if (Array.isArray(pairs)) {
+                contratosPdfMap = Object.fromEntries(pairs);
+            } else if (pairs && typeof pairs === "object") {
+                // Compat: por si alguien lo emite directamente como objeto.
+                contratosPdfMap = pairs;
+            }
+        } catch (exc) {
+            console.warn("No se pudo parsear contratos-pdf-map:", exc);
+            contratosPdfMap = {};
+        }
+    }
+
+    // Busca el botón "Abrir contrato en SharePoint" en la cabecera por
+    // su texto visible. Así no tenemos que añadir un id al template —
+    // el botón se identifica por lo que pone dentro.
+    //
+    // Devuelve null si el botón no existe (p.e. porque al cargar la
+    // página ningún contrato tenía PDF). En ese caso NO creamos el
+    // botón dinámicamente — haría falta recarga para verlo, que es
+    // justo lo que ya hace handleRefetchOutcome() tras un re-fetch.
+    function findHeaderContratoBtn() {
+        const anchors = document.querySelectorAll(".header-actions a");
+        for (let i = 0; i < anchors.length; i++) {
+            const text = (anchors[i].textContent || "").trim();
+            if (text === "Abrir contrato en SharePoint") {
+                return anchors[i];
+            }
+        }
+        return null;
+    }
+
+    // --------------------------------------------------------------- //
+    // Selector de contrato cuando hay varios.
+    //   - Muestra la card del contrato elegido, oculta las demás.
+    //   - Sincroniza el botón "Abrir contrato en SharePoint" de la
+    //     cabecera: cambia href al PDF del contrato seleccionado, o
+    //     oculta el botón si el contrato seleccionado no tiene PDF.
     // --------------------------------------------------------------- //
     function wireContratoSelector() {
         const selector = document.getElementById("selected_contrato_codigo");
         if (!selector || selector.tagName !== "SELECT") return;
         const cards = document.querySelectorAll(".js-contrato-card");
+        const headerBtn = findHeaderContratoBtn();
+
+        function syncHeaderBtn(codigo) {
+            if (!headerBtn) return;
+            const url = codigo ? contratosPdfMap[codigo] : null;
+            if (url) {
+                headerBtn.href = url;
+                headerBtn.title = "Abrir el PDF del contrato " + codigo;
+                headerBtn.style.display = "";
+            } else {
+                // No hay PDF para el contrato seleccionado (o no hay
+                // contrato seleccionado): ocultamos el botón. Al
+                // seleccionar otro contrato con PDF vuelve a aparecer.
+                headerBtn.style.display = "none";
+            }
+        }
+
         selector.addEventListener("change", function () {
             const codigo = selector.value;
             cards.forEach(function (card) {
                 card.style.display = card.dataset.codigo === codigo ? "" : "none";
             });
+            syncHeaderBtn(codigo);
         });
+
+        // Sincronización inicial por si el botón del header apunta a
+        // un contrato y el usuario cambia inmediatamente de selección.
+        syncHeaderBtn(selector.value);
     }
 
     wireContratoSelector();
@@ -222,14 +294,10 @@
             return false;
         }
         if (markApproved) {
-            // Solo redirigimos en el flujo de aprobar — en Guardar puro
-            // también, mantenemos el comportamiento original.
             const body = await response.json();
             window.location.href = body.redirect_url;
             return true;
         }
-        // Guardar sin aprobar: redirigir o recargar. Mantenemos el
-        // redirect como antes.
         const body = await response.json();
         window.location.href = body.redirect_url;
         return true;
@@ -274,10 +342,7 @@
         setButtonsDisabled(true);
         paintStatus("info", "Guardando cambios…");
         try {
-            // 1) Guardamos los campos SIN aprobar. En vez de redirigir,
-            //    hacemos la llamada directa al API de guardar.
             const savePayload = collectPayload(false);
-            // forzamos que el flag de "approved" no cambie nada
             const saveResp = await fetch(`/api/documents/${documentId}`, {
                 method: "PUT",
                 headers: { "Content-Type": "application/json" },
@@ -294,7 +359,6 @@
                 return;
             }
 
-            // 2) Re-búsqueda.
             paintStatus("info", "Consultando ERP…");
             const outcome = await refetchContratos();
             handleRefetchOutcome(outcome);
@@ -328,15 +392,14 @@
         paintStatus(kind, outcome.message || "Sin mensaje.");
 
         // Si hemos encontrado contratos, recargamos para pintar la card
-        // (o el desplegable) en lugar del alert amarillo.
+        // (o el desplegable) y para que el botón del header aparezca
+        // con el href correcto.
         if (outcome.count > 0) {
             setTimeout(function () {
                 window.location.reload();
             }, 700);
             return;
         }
-        // Si seguimos sin resultados o ha habido error, mantenemos al
-        // usuario en la página para que pueda editar/volver a intentar.
         setButtonsDisabled(false);
     }
 

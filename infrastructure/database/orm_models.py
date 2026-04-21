@@ -104,6 +104,10 @@ class AlbaranContratoMergeOrm(Base):
     ``importe_total`` = ``ctr.totbas`` (sin IVA).
     ``gra_rep_ide`` = id del PDF principal del contrato en ``ruesma_rep.gra``
     (usable para descarga vía ``/api/documents/read``).
+    ``pdf_sharepoint_relative_path`` / ``pdf_sharepoint_web_url`` =
+    ubicación en SharePoint del PDF ya descargado y subido (rellenados
+    tras el enrichment automático en el servicio 3 o tras el re-fetch
+    manual en el servicio 4).
     """
 
     __tablename__ = "albaran_contratos_merge"
@@ -127,6 +131,8 @@ class AlbaranContratoMergeOrm(Base):
     codigo_obra: Mapped[str | None] = mapped_column(String(32))
     nombre_obra: Mapped[str | None] = mapped_column(String(255))
     gra_rep_ide: Mapped[int | None] = mapped_column(Integer)
+    pdf_sharepoint_relative_path: Mapped[str | None] = mapped_column(String(1024))
+    pdf_sharepoint_web_url: Mapped[str | None] = mapped_column(String(1024))
     fetched_at_utc: Mapped[str] = mapped_column(String(64), nullable=False)
 
     document: Mapped[AlbaranDocumentMergeOrm] = relationship(back_populates="contratos")

@@ -12,16 +12,13 @@ from domain.models.contrato_sigrid_models import (
     ContratoFromSigrid,
     ContratoLineFromSigrid,
 )
+from domain.ports.contrato_refetch_port import ContratoPdfPayload
 
 logger = logging.getLogger(__name__)
 
 _LOG_PREFIX = "[contrato-refetch][sigrid-client]"
 
 
-# Query 1 (ruesma): cabecera + líneas en un solo resultset.
-# Usa ctr.totbas (sin IVA), incluye partida vía obrparpar,
-# filtra por con_ctr.emp = 1.
-# Parámetros: [cif, codigo_obra_normalizado].
 _SQL_HEADER_AND_LINES = """\
 SELECT
     ctr.ide             AS contrato_ide,
@@ -69,7 +66,6 @@ AND con_ctr.emp   = 1
 ORDER BY con_ctr.cod, ctrpro.pos
 """
 
-# Query 2a (ruesma): rcg + gra por contrato_ide.
 _SQL_GRA_COD_BY_CONTRATO = """\
 SELECT
     rcg.pos             AS rcg_pos,
@@ -82,7 +78,6 @@ WHERE rcg.con = ?
 ORDER BY rcg.pos
 """
 
-# Query 2b (ruesma_rep): gra por cod.
 _SQL_GRA_REP_BY_COD = """\
 SELECT
     ide                 AS gra_rep_ide,
@@ -94,8 +89,6 @@ WHERE cod = ?
 
 
 class SigridApiContratoClient:
-    """Cliente HTTP a ``sigrid-api``. Ver doc en servicio 3."""
-
     def __init__(
         self,
         *,
@@ -105,6 +98,7 @@ class SigridApiContratoClient:
         timeout_s: float = 30.0,
         max_rows: int = 1000,
         database_rep: str = "ruesma_rep",
+        pdf_timeout_s: float = 120.0,
     ) -> None:
         if not base_url:
             raise ValueError("SigridApiContratoClient requiere base_url")
@@ -118,33 +112,25 @@ class SigridApiContratoClient:
         self._database_rep = database_rep
         self._timeout_s = float(timeout_s)
         self._max_rows = int(max_rows)
+        self._pdf_timeout_s = float(pdf_timeout_s)
         logger.info(
             "%s Instanciado. base_url=%s database=%s database_rep=%s "
-            "max_rows=%s key_len=%s",
+            "max_rows=%s pdf_timeout_s=%s key_len=%s",
             _LOG_PREFIX,
             self._base_url,
             self._database,
             self._database_rep,
             self._max_rows,
+            self._pdf_timeout_s,
             len(function_key),
         )
 
-    # --------------------------------------------------------------- #
-    # API pública
-    # --------------------------------------------------------------- #
     def fetch_contratos(
         self,
         *,
         cif_proveedor: str,
         codigo_obra_normalizado: str,
     ) -> list[ContratoFromSigrid]:
-        logger.info(
-            "%s fetch_contratos INICIO cif=%s obra=%s",
-            _LOG_PREFIX,
-            cif_proveedor,
-            codigo_obra_normalizado,
-        )
-
         columns, rows = self._post_sql_read(
             sql=_SQL_HEADER_AND_LINES,
             parameters=[cif_proveedor, codigo_obra_normalizado],
@@ -154,12 +140,6 @@ class SigridApiContratoClient:
         contrato_ides, results_without_pdf = self._group_rows_by_contrato(
             columns=columns,
             rows=rows,
-        )
-        logger.info(
-            "%s Agrupado cabecera+líneas: contratos=%s total_lineas=%s",
-            _LOG_PREFIX,
-            len(results_without_pdf),
-            sum(len(c.lines) for c in results_without_pdf),
         )
 
         if not results_without_pdf:
@@ -182,21 +162,82 @@ class SigridApiContratoClient:
                     codigo_obra=contrato.codigo_obra,
                     nombre_obra=contrato.nombre_obra,
                     gra_rep_ide=gra_rep_ide,
+                    pdf_sharepoint_relative_path=None,
+                    pdf_sharepoint_web_url=None,
                     lines=contrato.lines,
                 )
             )
-
-        logger.info(
-            "%s fetch_contratos FIN contratos=%s pdfs_encontrados=%s",
-            _LOG_PREFIX,
-            len(enriched),
-            sum(1 for c in enriched if c.gra_rep_ide is not None),
-        )
         return enriched
 
-    # --------------------------------------------------------------- #
-    # HTTP primitive
-    # --------------------------------------------------------------- #
+    def download_contrato_pdf(
+        self,
+        *,
+        gra_rep_ide: int,
+    ) -> ContratoPdfPayload | None:
+        url = f"{self._base_url}/api/documents/read"
+        payload = {
+            "database": self._database_rep,
+            "schema": "dbo",
+            "table": "gra",
+            "id_column": "ide",
+            "id_value": int(gra_rep_ide),
+            "blob_column": "ima",
+            "filename_columns": ["nomori", "nom"],
+            "disposition": "attachment",
+        }
+        headers = {
+            "x-functions-key": self._function_key,
+            "Content-Type": "application/json",
+        }
+
+        logger.info(
+            "%s DOWNLOAD REQUEST gra_rep_ide=%s",
+            _LOG_PREFIX,
+            gra_rep_ide,
+        )
+
+        try:
+            with httpx.Client(timeout=self._pdf_timeout_s) as client:
+                response = client.post(url, json=payload, headers=headers)
+        except Exception as exc:
+            logger.exception(
+                "%s DOWNLOAD FALLO transporte gra_rep_ide=%s exc=%r",
+                _LOG_PREFIX,
+                gra_rep_ide,
+                exc,
+            )
+            raise
+
+        status = response.status_code
+        content = response.content or b""
+        content_type = response.headers.get("Content-Type", "") or None
+        filename_header = response.headers.get("X-Document-Filename", "") or ""
+
+        logger.info(
+            "%s DOWNLOAD RESPONSE status=%s bytes=%s filename=%r",
+            _LOG_PREFIX,
+            status,
+            len(content),
+            filename_header,
+        )
+
+        if status == 404:
+            return None
+        if status >= 400:
+            preview = content[:300].decode("utf-8", errors="replace")
+            raise RuntimeError(
+                f"sigrid-api /documents/read respondió {status}: {preview}"
+            )
+        if not content:
+            return None
+
+        filename = filename_header.strip() or f"contrato_{gra_rep_ide}.pdf"
+        return ContratoPdfPayload(
+            filename=filename,
+            content=content,
+            content_type=content_type,
+        )
+
     def _post_sql_read(
         self,
         *,
@@ -218,32 +259,22 @@ class SigridApiContratoClient:
             "Content-Type": "application/json",
         }
 
-        logger.info(
-            "%s REQUEST [%s] -> POST %s db=%s params=%s",
-            _LOG_PREFIX,
-            label,
-            url,
-            database,
-            parameters,
-        )
-
         transport = httpx.HTTPTransport(retries=1)
         try:
             with httpx.Client(timeout=self._timeout_s, transport=transport) as client:
                 response = client.post(url, json=payload, headers=headers)
         except Exception as exc:
-            logger.exception("%s FALLO de transporte [%s]. exc=%r", _LOG_PREFIX, label, exc)
+            logger.exception("%s FALLO transporte [%s]. exc=%r", _LOG_PREFIX, label, exc)
             raise
 
         status = response.status_code
         body_text = response.text or ""
         logger.info(
-            "%s RESPONSE [%s] <- status=%s body_len=%s preview=%s",
+            "%s RESPONSE [%s] <- status=%s body_len=%s",
             _LOG_PREFIX,
             label,
             status,
             len(body_text),
-            body_text[:200],
         )
 
         if status >= 400:
@@ -263,9 +294,6 @@ class SigridApiContratoClient:
         rows: list[list[Any]] = list(body.get("rows") or [])
         return columns, rows
 
-    # --------------------------------------------------------------- #
-    # Agrupación cabecera + líneas
-    # --------------------------------------------------------------- #
     @staticmethod
     def _group_rows_by_contrato(
         *,
@@ -332,14 +360,13 @@ class SigridApiContratoClient:
                     codigo_obra=_opt_str(header_row.get("codigo_obra")),
                     nombre_obra=_opt_str(header_row.get("nombre_obra")),
                     gra_rep_ide=None,
+                    pdf_sharepoint_relative_path=None,
+                    pdf_sharepoint_web_url=None,
                     lines=lines,
                 )
             )
         return contrato_ides, results
 
-    # --------------------------------------------------------------- #
-    # PDF lookup: rcg.con → ruesma.gra.cod → ruesma_rep.gra.ide
-    # --------------------------------------------------------------- #
     def _safe_fetch_gra_rep_ide(self, *, contrato_ide: int) -> int | None:
         if contrato_ide == 0:
             return None
@@ -347,7 +374,7 @@ class SigridApiContratoClient:
             return self._fetch_gra_rep_ide(contrato_ide=contrato_ide)
         except Exception as exc:
             logger.warning(
-                "%s PDF lookup falló para contrato_ide=%s. exc=%r",
+                "%s PDF lookup falló contrato_ide=%s exc=%r",
                 _LOG_PREFIX,
                 contrato_ide,
                 exc,
@@ -361,7 +388,6 @@ class SigridApiContratoClient:
             database=self._database,
             label=f"rcg_gra_for_ctr_{contrato_ide}",
         )
-
         pdf_cods: list[str] = []
         for row in rows:
             row_map = dict(zip(cols, row))
@@ -377,11 +403,6 @@ class SigridApiContratoClient:
                 pdf_cods.append(cod)
 
         if not pdf_cods:
-            logger.info(
-                "%s contrato_ide=%s sin PDFs vinculados",
-                _LOG_PREFIX,
-                contrato_ide,
-            )
             return None
 
         for cod in pdf_cods:
@@ -395,21 +416,7 @@ class SigridApiContratoClient:
                 row_map = dict(zip(cols_rep, row))
                 gra_rep_ide = _opt_int(row_map.get("gra_rep_ide"))
                 if gra_rep_ide is not None:
-                    logger.info(
-                        "%s contrato_ide=%s → gra_rep_ide=%s (cod=%s)",
-                        _LOG_PREFIX,
-                        contrato_ide,
-                        gra_rep_ide,
-                        cod,
-                    )
                     return gra_rep_ide
-
-        logger.warning(
-            "%s contrato_ide=%s PDFs vinculados pero ningún gra_rep_ide; cods=%s",
-            _LOG_PREFIX,
-            contrato_ide,
-            pdf_cods,
-        )
         return None
 
 

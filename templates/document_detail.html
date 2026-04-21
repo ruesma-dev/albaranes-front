@@ -1,5 +1,25 @@
 <!-- templates/document_detail.html -->
 {% extends "base.html" %}
+
+{#
+    Pre-cálculo: si hay exactamente 1 contrato usamos su PDF. Si hay
+    varios, usamos el PDF del contrato actualmente seleccionado. Si
+    ninguno cumple, contrato_pdf_url queda None y el botón no se pinta.
+#}
+{% set contrato_pdf_url = None %}
+{% set contrato_pdf_codigo = None %}
+{% if document.contratos|length == 1 and document.contratos[0].pdf_sharepoint_web_url %}
+    {% set contrato_pdf_url = document.contratos[0].pdf_sharepoint_web_url %}
+    {% set contrato_pdf_codigo = document.contratos[0].codigo_contrato %}
+{% elif document.selected_contrato_codigo %}
+    {% for c in document.contratos %}
+        {% if c.codigo_contrato == document.selected_contrato_codigo and c.pdf_sharepoint_web_url %}
+            {% set contrato_pdf_url = c.pdf_sharepoint_web_url %}
+            {% set contrato_pdf_codigo = c.codigo_contrato %}
+        {% endif %}
+    {% endfor %}
+{% endif %}
+
 {% block content %}
 <section class="page-header detail-header">
     <div>
@@ -30,7 +50,18 @@
         </form>
         <a href="/documents" class="btn secondary">← Volver</a>
         {% if document.document_url %}
-            <a href="{{ document.document_url }}" target="_blank" rel="noreferrer" class="btn secondary">Abrir en SharePoint</a>
+            <a href="{{ document.document_url }}" target="_blank" rel="noreferrer" class="btn secondary">
+                Abrir albarán en SharePoint
+            </a>
+        {% endif %}
+        {% if contrato_pdf_url %}
+            <a href="{{ contrato_pdf_url }}"
+               target="_blank"
+               rel="noreferrer"
+               class="btn secondary"
+               title="Abrir el PDF del contrato {{ contrato_pdf_codigo }}">
+                Abrir contrato en SharePoint
+            </a>
         {% endif %}
     </div>
 </section>
@@ -60,10 +91,25 @@
             </div>
         </div>
         {% if preview_enabled %}
-            <iframe class="document-frame" src="{{ document_preview_url }}#zoom=page-width"></iframe>
+            {#
+                Fragmento del iframe:
+                - navpanes=0: OCULTA el panel lateral de miniaturas del visor
+                  PDF del navegador (es el que el usuario quería quitar).
+                  Respetado en Chrome/Edge. Firefox usa otro visor que
+                  ignora este parámetro — si usas Firefox, la miniatura
+                  seguirá apareciendo aunque pequeña por el ancho reducido
+                  del panel en styles.css.
+                - toolbar=1: mantiene la barra de herramientas superior.
+                - scrollbar=1: scroll vertical dentro del PDF.
+                - pagemode=none: refuerza el ocultamiento de paneles.
+                - view=FitH: ajusta al ancho para que el albarán se lea
+                  sin tener que hacer zoom manual.
+            #}
+            <iframe class="document-frame"
+                    src="{{ document_preview_url }}#toolbar=1&navpanes=0&scrollbar=1&pagemode=none&view=FitH"></iframe>
         {% elif document.document_url %}
             <div class="empty-state">
-                La vista previa embebida no está configurada. Usa el botón “Abrir en SharePoint”.
+                La vista previa embebida no está configurada. Usa el botón “Abrir albarán en SharePoint”.
             </div>
         {% else %}
             <div class="empty-state">No hay documento disponible para vista previa.</div>
@@ -75,7 +121,6 @@
             {% if document.provider_document_id %}
                 <div><strong>ID registro {{ view_label(document.view_mode) }}:</strong> <code>{{ document.provider_document_id }}</code></div>
             {% endif %}
-            <div class="small muted">El visor se abre con zoom de ancho de página. El tamaño exacto del panel de miniaturas depende del visor PDF del navegador.</div>
         </div>
     </aside>
 
@@ -149,6 +194,18 @@
                                 <dd>{{ c.importe_total | importe_eur }}</dd>
                             </div>
                         </div>
+                        {#
+                            Si el contrato NO tiene PDF mostramos aviso sutil
+                            dentro de la tarjeta. Si lo tiene, el botón está
+                            arriba en la cabecera junto al de abrir albarán.
+                        #}
+                        {% if not c.pdf_sharepoint_web_url %}
+                            <div class="contrato-actions">
+                                <span class="contrato-no-pdf muted small">
+                                    Sin PDF del contrato disponible
+                                </span>
+                            </div>
+                        {% endif %}
                     </div>
                 </div>
                 {% if document.is_editable %}
@@ -202,6 +259,19 @@
                                         <dd>{{ c.importe_total | importe_eur }}</dd>
                                     </div>
                                 </div>
+                                {#
+                                    Aviso sutil SOLO si el contrato seleccionado
+                                    no tiene PDF. El botón de abrir PDF vive en
+                                    la cabecera y cambia de contrato al cambiar
+                                    la selección (ver static/app.js).
+                                #}
+                                {% if not c.pdf_sharepoint_web_url %}
+                                    <div class="contrato-actions">
+                                        <span class="contrato-no-pdf muted small">
+                                            Sin PDF del contrato disponible
+                                        </span>
+                                    </div>
+                                {% endif %}
                             </div>
                         </div>
                     {% endfor %}
@@ -394,6 +464,27 @@
         </section>
     </section>
 </section>
+
+{#
+    Mapa de PDFs por código de contrato, consumido por static/app.js
+    para actualizar el botón 'Abrir contrato en SharePoint' de la
+    cabecera cuando el usuario cambia el contrato seleccionado en el
+    desplegable (caso de múltiples contratos).
+
+    Jinja2 no soporta list/dict comprehensions inline como Python.
+    Construimos una lista de pares [codigo, url] con un bucle explícito
+    sobre un namespace mutable. En app.js hacemos Object.fromEntries(pares)
+    para obtener el diccionario.
+#}
+{% if document.contratos|length > 1 %}
+    {% set ns = namespace(pairs=[]) %}
+    {% for c in document.contratos %}
+        {% set _ = ns.pairs.append([c.codigo_contrato, c.pdf_sharepoint_web_url]) %}
+    {% endfor %}
+    <script id="contratos-pdf-map" type="application/json">
+        {{ ns.pairs | tojson }}
+    </script>
+{% endif %}
 
 {% if document.is_editable %}
     <script id="document-data" data-document-id="{{ document.id }}" type="application/json">{{ document_json | safe }}</script>
