@@ -18,20 +18,20 @@ logger = logging.getLogger(__name__)
 _LOG_PREFIX = "[contrato-refetch][sigrid-client]"
 
 
-# Query ampliada: cabecera + líneas en un solo resultset.
-# Misma query que el servicio 3 (validada con diagnose_sigrid_contrato.py).
-# LEFT JOIN a ctrpro/pro/con_pro para no perder contratos sin líneas.
-# ORDER BY para agrupar en streaming por codigo_contrato.
-# Parámetros posicionales ``?`` en orden [cif, codigo_obra].
-_SQL_QUERY = """\
+# Query 1 (ruesma): cabecera + líneas en un solo resultset.
+# Usa ctr.totbas (sin IVA), incluye partida vía obrparpar,
+# filtra por con_ctr.emp = 1.
+# Parámetros: [cif, codigo_obra_normalizado].
+_SQL_HEADER_AND_LINES = """\
 SELECT
+    ctr.ide             AS contrato_ide,
     con_ctr.cod         AS codigo_contrato,
     con_ctr.res         AS nombre_contrato,
     con_ctr.fec         AS fecha_alta_contrato,
     ctr.fecdoc          AS fecha_contrato,
     ctr.fecvig1         AS vigencia_desde,
     ctr.fecvig2         AS vigencia_hasta,
-    ctr.tot             AS importe_total,
+    ctr.totbas          AS importe_total,
     ctr.entcif          AS cif_proveedor,
     ctr.entres          AS nombre_proveedor,
     con_obr.cod         AS codigo_obra,
@@ -51,7 +51,9 @@ SELECT
     ctrpro.dto          AS descuentos,
     ctrpro.tot          AS importe_linea,
     ctrpro.ivacuo       AS cuota_iva,
-    ctrpro.docoricod    AS doc_origen
+    ctrpro.docoricod    AS doc_origen,
+    obrparpar.cod       AS codigo_partida,
+    obrparpar.res       AS descripcion_partida
 FROM ctr
 JOIN con AS con_ctr       ON ctr.ide     = con_ctr.ide
 JOIN con AS con_obr       ON ctr.obride  = con_obr.ide
@@ -59,15 +61,40 @@ JOIN prv                  ON ctr.entide  = prv.ide
 LEFT JOIN ctrpro          ON ctrpro.docide = ctr.ide
 LEFT JOIN pro             ON ctrpro.proide = pro.ide
 LEFT JOIN con AS con_pro  ON pro.ide       = con_pro.ide
+LEFT JOIN obrparpar       ON ctrpro.paride = obrparpar.ide
 WHERE
-    prv.cif     = ?
-AND con_obr.cod = ?
+    prv.cif       = ?
+AND con_obr.cod   = ?
+AND con_ctr.emp   = 1
 ORDER BY con_ctr.cod, ctrpro.pos
+"""
+
+# Query 2a (ruesma): rcg + gra por contrato_ide.
+_SQL_GRA_COD_BY_CONTRATO = """\
+SELECT
+    rcg.pos             AS rcg_pos,
+    gra.cod             AS gra_cod,
+    gra.nom             AS gra_nom,
+    gra.nomori          AS gra_nomori
+FROM rcg
+JOIN gra ON rcg.gra = gra.ide
+WHERE rcg.con = ?
+ORDER BY rcg.pos
+"""
+
+# Query 2b (ruesma_rep): gra por cod.
+_SQL_GRA_REP_BY_COD = """\
+SELECT
+    ide                 AS gra_rep_ide,
+    nom                 AS gra_nom,
+    nomori              AS gra_nomori
+FROM gra
+WHERE cod = ?
 """
 
 
 class SigridApiContratoClient:
-    """Cliente HTTP que llama a ``sigrid-api`` para cabeceras + líneas."""
+    """Cliente HTTP a ``sigrid-api``. Ver doc en servicio 3."""
 
     def __init__(
         self,
@@ -77,6 +104,7 @@ class SigridApiContratoClient:
         database: str,
         timeout_s: float = 30.0,
         max_rows: int = 1000,
+        database_rep: str = "ruesma_rep",
     ) -> None:
         if not base_url:
             raise ValueError("SigridApiContratoClient requiere base_url")
@@ -87,28 +115,101 @@ class SigridApiContratoClient:
         self._base_url = base_url.rstrip("/")
         self._function_key = function_key
         self._database = database
+        self._database_rep = database_rep
         self._timeout_s = float(timeout_s)
         self._max_rows = int(max_rows)
         logger.info(
-            "%s Instanciado. base_url=%s database=%s max_rows=%s key_len=%s",
+            "%s Instanciado. base_url=%s database=%s database_rep=%s "
+            "max_rows=%s key_len=%s",
             _LOG_PREFIX,
             self._base_url,
             self._database,
+            self._database_rep,
             self._max_rows,
             len(function_key),
         )
 
+    # --------------------------------------------------------------- #
+    # API pública
+    # --------------------------------------------------------------- #
     def fetch_contratos(
         self,
         *,
         cif_proveedor: str,
         codigo_obra_normalizado: str,
     ) -> list[ContratoFromSigrid]:
+        logger.info(
+            "%s fetch_contratos INICIO cif=%s obra=%s",
+            _LOG_PREFIX,
+            cif_proveedor,
+            codigo_obra_normalizado,
+        )
+
+        columns, rows = self._post_sql_read(
+            sql=_SQL_HEADER_AND_LINES,
+            parameters=[cif_proveedor, codigo_obra_normalizado],
+            database=self._database,
+            label="header_and_lines",
+        )
+        contrato_ides, results_without_pdf = self._group_rows_by_contrato(
+            columns=columns,
+            rows=rows,
+        )
+        logger.info(
+            "%s Agrupado cabecera+líneas: contratos=%s total_lineas=%s",
+            _LOG_PREFIX,
+            len(results_without_pdf),
+            sum(len(c.lines) for c in results_without_pdf),
+        )
+
+        if not results_without_pdf:
+            return []
+
+        enriched: list[ContratoFromSigrid] = []
+        for contrato, contrato_ide in zip(results_without_pdf, contrato_ides):
+            gra_rep_ide = self._safe_fetch_gra_rep_ide(contrato_ide=contrato_ide)
+            enriched.append(
+                ContratoFromSigrid(
+                    codigo_contrato=contrato.codigo_contrato,
+                    nombre_contrato=contrato.nombre_contrato,
+                    fecha_alta_contrato=contrato.fecha_alta_contrato,
+                    fecha_contrato=contrato.fecha_contrato,
+                    vigencia_desde=contrato.vigencia_desde,
+                    vigencia_hasta=contrato.vigencia_hasta,
+                    importe_total=contrato.importe_total,
+                    cif_proveedor=contrato.cif_proveedor,
+                    nombre_proveedor=contrato.nombre_proveedor,
+                    codigo_obra=contrato.codigo_obra,
+                    nombre_obra=contrato.nombre_obra,
+                    gra_rep_ide=gra_rep_ide,
+                    lines=contrato.lines,
+                )
+            )
+
+        logger.info(
+            "%s fetch_contratos FIN contratos=%s pdfs_encontrados=%s",
+            _LOG_PREFIX,
+            len(enriched),
+            sum(1 for c in enriched if c.gra_rep_ide is not None),
+        )
+        return enriched
+
+    # --------------------------------------------------------------- #
+    # HTTP primitive
+    # --------------------------------------------------------------- #
+    def _post_sql_read(
+        self,
+        *,
+        sql: str,
+        parameters: list[Any],
+        database: str,
+        label: str,
+    ) -> tuple[list[str], list[list[Any]]]:
         url = f"{self._base_url}/api/sql/read"
         payload = {
-            "database": self._database,
-            "sql": _SQL_QUERY,
-            "parameters": [cif_proveedor, codigo_obra_normalizado],
+            "database": database,
+            "sql": sql,
+            "parameters": parameters,
             "timeout_seconds": int(self._timeout_s),
             "max_rows": self._max_rows,
         }
@@ -118,11 +219,12 @@ class SigridApiContratoClient:
         }
 
         logger.info(
-            "%s REQUEST -> POST %s cif=%s obra=%s",
+            "%s REQUEST [%s] -> POST %s db=%s params=%s",
             _LOG_PREFIX,
+            label,
             url,
-            cif_proveedor,
-            codigo_obra_normalizado,
+            database,
+            parameters,
         )
 
         transport = httpx.HTTPTransport(retries=1)
@@ -130,17 +232,18 @@ class SigridApiContratoClient:
             with httpx.Client(timeout=self._timeout_s, transport=transport) as client:
                 response = client.post(url, json=payload, headers=headers)
         except Exception as exc:
-            logger.exception("%s FALLO de transporte. exc=%r", _LOG_PREFIX, exc)
+            logger.exception("%s FALLO de transporte [%s]. exc=%r", _LOG_PREFIX, label, exc)
             raise
 
         status = response.status_code
         body_text = response.text or ""
         logger.info(
-            "%s RESPONSE <- status=%s body_len=%s preview=%s",
+            "%s RESPONSE [%s] <- status=%s body_len=%s preview=%s",
             _LOG_PREFIX,
+            label,
             status,
             len(body_text),
-            body_text[:300],
+            body_text[:200],
         )
 
         if status >= 400:
@@ -158,27 +261,17 @@ class SigridApiContratoClient:
 
         columns: list[str] = list(body.get("columns") or [])
         rows: list[list[Any]] = list(body.get("rows") or [])
-        logger.info(
-            "%s Parseado: row_count=%s (incluye líneas)",
-            _LOG_PREFIX,
-            len(rows),
-        )
+        return columns, rows
 
-        results = self._group_rows_by_contrato(columns=columns, rows=rows)
-        logger.info(
-            "%s Agrupado: contratos=%s total_lineas=%s",
-            _LOG_PREFIX,
-            len(results),
-            sum(len(c.lines) for c in results),
-        )
-        return results
-
+    # --------------------------------------------------------------- #
+    # Agrupación cabecera + líneas
+    # --------------------------------------------------------------- #
     @staticmethod
     def _group_rows_by_contrato(
         *,
         columns: list[str],
         rows: list[list[Any]],
-    ) -> list[ContratoFromSigrid]:
+    ) -> tuple[list[int], list[ContratoFromSigrid]]:
         buckets: "OrderedDict[str, tuple[dict[str, Any], list[ContratoLineFromSigrid]]]" = (
             OrderedDict()
         )
@@ -194,7 +287,6 @@ class SigridApiContratoClient:
 
             linea_value = row_map.get("linea")
             if linea_value is None:
-                # Contrato sin líneas (LEFT JOIN) → solo cabecera.
                 continue
 
             buckets[codigo][1].append(
@@ -216,11 +308,16 @@ class SigridApiContratoClient:
                     importe_linea=_opt_float(row_map.get("importe_linea")),
                     cuota_iva=_opt_float(row_map.get("cuota_iva")),
                     doc_origen=_opt_str(row_map.get("doc_origen")),
+                    codigo_partida=_opt_str(row_map.get("codigo_partida")),
+                    descripcion_partida=_opt_str(row_map.get("descripcion_partida")),
                 )
             )
 
+        contrato_ides: list[int] = []
         results: list[ContratoFromSigrid] = []
         for codigo, (header_row, lines) in buckets.items():
+            contrato_ide = _opt_int(header_row.get("contrato_ide"))
+            contrato_ides.append(contrato_ide if contrato_ide is not None else 0)
             results.append(
                 ContratoFromSigrid(
                     codigo_contrato=codigo,
@@ -234,10 +331,86 @@ class SigridApiContratoClient:
                     nombre_proveedor=_opt_str(header_row.get("nombre_proveedor")),
                     codigo_obra=_opt_str(header_row.get("codigo_obra")),
                     nombre_obra=_opt_str(header_row.get("nombre_obra")),
+                    gra_rep_ide=None,
                     lines=lines,
                 )
             )
-        return results
+        return contrato_ides, results
+
+    # --------------------------------------------------------------- #
+    # PDF lookup: rcg.con → ruesma.gra.cod → ruesma_rep.gra.ide
+    # --------------------------------------------------------------- #
+    def _safe_fetch_gra_rep_ide(self, *, contrato_ide: int) -> int | None:
+        if contrato_ide == 0:
+            return None
+        try:
+            return self._fetch_gra_rep_ide(contrato_ide=contrato_ide)
+        except Exception as exc:
+            logger.warning(
+                "%s PDF lookup falló para contrato_ide=%s. exc=%r",
+                _LOG_PREFIX,
+                contrato_ide,
+                exc,
+            )
+            return None
+
+    def _fetch_gra_rep_ide(self, *, contrato_ide: int) -> int | None:
+        cols, rows = self._post_sql_read(
+            sql=_SQL_GRA_COD_BY_CONTRATO,
+            parameters=[contrato_ide],
+            database=self._database,
+            label=f"rcg_gra_for_ctr_{contrato_ide}",
+        )
+
+        pdf_cods: list[str] = []
+        for row in rows:
+            row_map = dict(zip(cols, row))
+            cod = _opt_str(row_map.get("gra_cod"))
+            if cod is None:
+                continue
+            name = (
+                _opt_str(row_map.get("gra_nomori"))
+                or _opt_str(row_map.get("gra_nom"))
+                or ""
+            )
+            if name.lower().endswith(".pdf"):
+                pdf_cods.append(cod)
+
+        if not pdf_cods:
+            logger.info(
+                "%s contrato_ide=%s sin PDFs vinculados",
+                _LOG_PREFIX,
+                contrato_ide,
+            )
+            return None
+
+        for cod in pdf_cods:
+            cols_rep, rows_rep = self._post_sql_read(
+                sql=_SQL_GRA_REP_BY_COD,
+                parameters=[cod],
+                database=self._database_rep,
+                label=f"gra_rep_for_cod_{cod}",
+            )
+            for row in rows_rep:
+                row_map = dict(zip(cols_rep, row))
+                gra_rep_ide = _opt_int(row_map.get("gra_rep_ide"))
+                if gra_rep_ide is not None:
+                    logger.info(
+                        "%s contrato_ide=%s → gra_rep_ide=%s (cod=%s)",
+                        _LOG_PREFIX,
+                        contrato_ide,
+                        gra_rep_ide,
+                        cod,
+                    )
+                    return gra_rep_ide
+
+        logger.warning(
+            "%s contrato_ide=%s PDFs vinculados pero ningún gra_rep_ide; cods=%s",
+            _LOG_PREFIX,
+            contrato_ide,
+            pdf_cods,
+        )
+        return None
 
 
 def _opt_str(value: Any) -> str | None:

@@ -8,6 +8,9 @@ from dataclasses import dataclass, field
 class ContratoLineFromSigrid:
     """Línea de detalle (``ctrpro``) de un contrato del ERP.
 
+    Incluye los datos de la partida a la que se imputa la línea
+    (``obrparpar``).
+
     Réplica del mismo modelo en el servicio 3. Duplicación intencional:
     son dos microservicios distintos y compartir código exigiría una
     librería interna que aún no merece la pena.
@@ -30,19 +33,25 @@ class ContratoLineFromSigrid:
     importe_linea: float | None
     cuota_iva: float | None
     doc_origen: str | None
+    codigo_partida: str | None
+    descripcion_partida: str | None
 
 
 @dataclass(frozen=True)
 class ContratoFromSigrid:
-    """Contrato devuelto por Sigrid (cabecera + líneas).
+    """Contrato devuelto por Sigrid (cabecera + líneas + PDF).
 
-    El cliente HTTP llama a la query ampliada (JOIN a ``ctrpro``) que
-    trae cabecera + líneas en un solo resultset, los agrupa en memoria
-    por ``codigo_contrato`` (único dentro de (cif, obra)) y devuelve
-    estos DTOs ya completos.
+    El cliente HTTP:
+      - Pide cabecera + líneas (con partida) en un solo resultset,
+        agrupa en memoria por ``codigo_contrato``.
+      - Pide documentos vinculados (ruesma.rcg + ruesma.gra) y por
+        cada PDF resuelve ``ruesma_rep.gra.ide`` para tenerlo listo
+        para descarga futura.
 
-    ``lines`` es lista vacía si el contrato no tiene líneas registradas
-    en el ERP (LEFT JOIN no casó).
+    ``importe_total`` = ``ctr.totbas`` (importe SIN IVA).
+    ``gra_rep_ide`` = id del PDF principal del contrato en la BBDD
+    réplica ``ruesma_rep``. ``None`` si el contrato no tiene PDF
+    vinculado.
     """
 
     codigo_contrato: str
@@ -51,9 +60,10 @@ class ContratoFromSigrid:
     fecha_contrato: int | None
     vigencia_desde: int | None
     vigencia_hasta: int | None
-    importe_total: float | None
+    importe_total: float | None  # ctr.totbas (sin IVA)
     cif_proveedor: str | None
     nombre_proveedor: str | None
     codigo_obra: str | None
     nombre_obra: str | None
+    gra_rep_ide: int | None
     lines: list[ContratoLineFromSigrid] = field(default_factory=list)

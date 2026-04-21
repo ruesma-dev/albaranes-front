@@ -34,8 +34,6 @@ class AlbaranDocumentMergeOrm(Base):
 
     # Código del contrato elegido para este albarán (ref. soft, no FK).
     # NULL = sin elegir (0 contratos encontrados, o >1 sin elegir aún).
-    # Se auto-setea al único contrato si ``albaran_contratos_merge`` trae
-    # exactamente 1 fila para (cif, obra).
     selected_contrato_codigo: Mapped[str | None] = mapped_column(String(64))
 
     sharepoint_relative_path: Mapped[str | None] = mapped_column(String(1024))
@@ -63,9 +61,6 @@ class AlbaranDocumentMergeOrm(Base):
         order_by="AlbaranLineMergeOrm.line_index",
     )
 
-    # Contratos enriquecidos por el servicio 3 (read-only desde este
-    # servicio — el servicio 4 NO los escribe, solo los lee). El pipeline
-    # de enrichment del servicio 3 es quien los inserta/actualiza.
     contratos: Mapped[list["AlbaranContratoMergeOrm"]] = relationship(
         back_populates="document",
         order_by="AlbaranContratoMergeOrm.codigo_contrato",
@@ -106,10 +101,9 @@ class AlbaranLineMergeOrm(Base):
 class AlbaranContratoMergeOrm(Base):
     """Contratos (proveedor × obra) asociados al merge doc.
 
-    Tabla creada por el servicio 3 (``scripts/diagnose_sigrid_contrato.py``
-    valida la query que la puebla). Relación 1:N con el merge doc. Mapeo
-    read-only desde aquí; si la tabla no existe todavía en BBDD, falla
-    solo al consultarla — no al construir el engine.
+    ``importe_total`` = ``ctr.totbas`` (sin IVA).
+    ``gra_rep_ide`` = id del PDF principal del contrato en ``ruesma_rep.gra``
+    (usable para descarga vía ``/api/documents/read``).
     """
 
     __tablename__ = "albaran_contratos_merge"
@@ -132,22 +126,17 @@ class AlbaranContratoMergeOrm(Base):
     nombre_proveedor: Mapped[str | None] = mapped_column(String(255))
     codigo_obra: Mapped[str | None] = mapped_column(String(32))
     nombre_obra: Mapped[str | None] = mapped_column(String(255))
+    gra_rep_ide: Mapped[int | None] = mapped_column(Integer)
     fetched_at_utc: Mapped[str] = mapped_column(String(64), nullable=False)
 
     document: Mapped[AlbaranDocumentMergeOrm] = relationship(back_populates="contratos")
 
 
 class AlbaranContratoLineMergeOrm(Base):
-    """Líneas de detalle (``ctrpro``) de un contrato de cabecera.
+    """Líneas de detalle (``ctrpro``) de un contrato.
 
-    Poblada por el enrichment (servicios 3 y 4) a partir de la query
-    ampliada a Sigrid. Desde el servicio 4 es read/write (el re-fetch
-    manual inserta aquí), pero el servicio 4 NO consume estas líneas
-    en ninguna vista todavía — quedan almacenadas para uso futuro
-    (comparación contrato vs albarán, por ejemplo).
-
-    Cascada: ``ondelete="CASCADE"`` a nivel BBDD → al borrar la
-    cabecera del contrato, las líneas caen solas sin lógica aplicativa.
+    Incluye partida (``obrparpar.cod`` / ``obrparpar.res``).
+    Poblada por el enrichment (servicios 3 y 4).
     """
 
     __tablename__ = "albaran_contrato_lines_merge"
@@ -176,6 +165,8 @@ class AlbaranContratoLineMergeOrm(Base):
     importe_linea: Mapped[float | None] = mapped_column(Float)
     cuota_iva: Mapped[float | None] = mapped_column(Float)
     doc_origen: Mapped[str | None] = mapped_column(String(64))
+    codigo_partida: Mapped[str | None] = mapped_column(String(64), index=True)
+    descripcion_partida: Mapped[str | None] = mapped_column(Text)
     fetched_at_utc: Mapped[str] = mapped_column(String(64), nullable=False)
 
 

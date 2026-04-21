@@ -92,11 +92,12 @@ class AlbaranReviewRepository:
             "ALTER TABLE albaran_documents_merge ADD COLUMN IF NOT EXISTS review_notes TEXT",
             # Contrato seleccionado (ref. soft, no FK).
             "ALTER TABLE albaran_documents_merge ADD COLUMN IF NOT EXISTS selected_contrato_codigo VARCHAR(64)",
-            # Tabla nueva: líneas de detalle de los contratos.
-            # Se crea DESPUÉS de albaran_contratos_merge (que el servicio 3
-            # ya crea); si el servicio 4 arranca antes y la tabla padre no
-            # existe, este CREATE fallará — pero el guard de _tables_ready()
-            # impide llegar hasta aquí en ese escenario.
+            # Columna nueva en cabecera de contrato: id del PDF en ruesma_rep.gra.
+            # La tabla albaran_contratos_merge la crea el servicio 3; esta ALTER
+            # es idempotente y solo tiene efecto si la tabla ya existe.
+            "ALTER TABLE albaran_contratos_merge ADD COLUMN IF NOT EXISTS gra_rep_ide INTEGER",
+            # Tabla de líneas de contrato (la crea quien llegue primero:
+            # servicio 3 via ORM o servicio 4 via este DDL).
             """
             CREATE TABLE IF NOT EXISTS albaran_contrato_lines_merge (
                 id                     SERIAL PRIMARY KEY,
@@ -119,9 +120,20 @@ class AlbaranReviewRepository:
                 importe_linea          DOUBLE PRECISION,
                 cuota_iva              DOUBLE PRECISION,
                 doc_origen             VARCHAR(64),
+                codigo_partida         VARCHAR(64),
+                descripcion_partida    TEXT,
                 fetched_at_utc         VARCHAR(64) NOT NULL
             )
             """,
+            # ALTERs defensivos por si la tabla ya existía con un esquema viejo.
+            (
+                "ALTER TABLE albaran_contrato_lines_merge "
+                "ADD COLUMN IF NOT EXISTS codigo_partida VARCHAR(64)"
+            ),
+            (
+                "ALTER TABLE albaran_contrato_lines_merge "
+                "ADD COLUMN IF NOT EXISTS descripcion_partida TEXT"
+            ),
             (
                 "CREATE INDEX IF NOT EXISTS ix_albaran_contrato_lines_merge_contrato_id "
                 "ON albaran_contrato_lines_merge (contrato_id)"
@@ -129,6 +141,10 @@ class AlbaranReviewRepository:
             (
                 "CREATE INDEX IF NOT EXISTS ix_albaran_contrato_lines_merge_codigo "
                 "ON albaran_contrato_lines_merge (codigo_contrato)"
+            ),
+            (
+                "CREATE INDEX IF NOT EXISTS ix_albaran_contrato_lines_merge_partida "
+                "ON albaran_contrato_lines_merge (codigo_partida)"
             ),
             (
                 "CREATE INDEX IF NOT EXISTS ix_albaran_documents_merge_approved "
@@ -209,10 +225,6 @@ class AlbaranReviewRepository:
                 return None
             _ = merge_doc.lines  # eager-load
 
-            # Cargar contratos asociados (read-only). Siempre se cargan,
-            # independientemente del view_mode, para que la cabecera
-            # muestre la info del contrato también en vistas por proveedor
-            # (ahí la sección es informativa, no permite cambiar selección).
             contratos_orm = session.scalars(
                 select(AlbaranContratoMergeOrm)
                 .where(AlbaranContratoMergeOrm.document_id == merge_doc.id)
@@ -414,20 +426,12 @@ class AlbaranReviewRepository:
 
     # ================================================================== #
     # Re-fetch manual de contratos desde el portal.
-    # Usado por ContratoRefetchService para:
-    #   1) Leer el (cif, obra) actuales del merge.
-    #   2) Tras llamar a Sigrid, reemplazar atómicamente cabeceras +
-    #      líneas y fijar selected_contrato_codigo en un solo paso.
-    # Deliberadamente NO toca reviewed_at_utc ni last_modified_at_utc
-    # porque esto es un enriquecimiento automático, no una edición
-    # humana (auditoría intacta).
     # ================================================================== #
     def get_merge_cif_and_obra(
         self,
         *,
         document_id: str,
     ) -> tuple[str | None, str | None]:
-        """Devuelve (proveedor_cif, obra_codigo) del merge doc."""
         self.initialize()
         with self._session_factory.create_session() as session:
             document = session.get(AlbaranDocumentMergeOrm, document_id)
@@ -444,14 +448,9 @@ class AlbaranReviewRepository:
     ) -> None:
         """Reemplaza cabeceras + líneas y fija selected_contrato_codigo.
 
-        Flujo transaccional (una sola transacción, commit al final):
-          1) Verifica que el merge doc existe.
-          2) DELETE de cabeceras previas del documento. Las líneas
-             asociadas caen por ON DELETE CASCADE de la FK.
-          3) INSERT de cabeceras nuevas. Tras cada ``session.flush()``,
-             ``header_orm.id`` queda asignado → insertamos sus líneas
-             con el FK correcto.
-          4) UPDATE del selected_contrato_codigo en el doc merge.
+        Persiste ``gra_rep_ide`` en la cabecera y ``codigo_partida`` +
+        ``descripcion_partida`` en cada línea. Todo en una sola
+        transacción.
         """
         self.initialize()
         now = datetime.now(timezone.utc).isoformat()
@@ -467,6 +466,7 @@ class AlbaranReviewRepository:
             )
             session.flush()
 
+            total_lines_inserted = 0
             for contrato in contratos:
                 header_orm = AlbaranContratoMergeOrm(
                     document_id=document_id,
@@ -481,10 +481,11 @@ class AlbaranReviewRepository:
                     nombre_proveedor=contrato.nombre_proveedor,
                     codigo_obra=contrato.codigo_obra,
                     nombre_obra=contrato.nombre_obra,
+                    gra_rep_ide=contrato.gra_rep_ide,
                     fetched_at_utc=now,
                 )
                 session.add(header_orm)
-                session.flush()  # asigna header_orm.id para las líneas
+                session.flush()  # asigna header_orm.id
 
                 for line in (contrato.lines or []):
                     session.add(
@@ -507,9 +508,12 @@ class AlbaranReviewRepository:
                             importe_linea=line.importe_linea,
                             cuota_iva=line.cuota_iva,
                             doc_origen=line.doc_origen,
+                            codigo_partida=line.codigo_partida,
+                            descripcion_partida=line.descripcion_partida,
                             fetched_at_utc=now,
                         )
                     )
+                    total_lines_inserted += 1
 
             session.execute(
                 text(
@@ -546,10 +550,6 @@ class AlbaranReviewRepository:
             document.reviewed_at_utc = self._utc_iso()
             document.last_modified_at_utc = self._utc_iso()
 
-            # Actualiza selected_contrato_codigo validando contra los
-            # contratos realmente guardados del doc. Si el usuario manda
-            # un código que no existe (p.e. JSON manipulado), dejamos NULL
-            # en lugar de guardar una referencia rota.
             proposed_codigo = self._clean_text(payload.selected_contrato_codigo)
             if proposed_codigo is not None:
                 existing_codes = set(
