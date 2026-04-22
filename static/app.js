@@ -3,26 +3,22 @@
 // Portal de revisión — interacciones del detalle editable:
 //   - Selector de contrato cuando hay varios (y sincronía con el botón
 //     "Abrir contrato en SharePoint" de la cabecera).
-//   - Edición inline de líneas.
+//   - Edición inline de líneas: el <tbody> viene PRE-RENDERIZADO desde
+//     el servidor para mezclar datos extraídos y valorados. El JS solo
+//     añade/elimina filas y recolecta para guardar.
 //   - Guardar/Aprobar contra PUT /api/documents/{id}.
 //   - Botones "Guardar y volver a buscar" / "Solo volver a buscar"
-//     dentro del alert amarillo cuando hay 0 contratos. Llaman a
-//     POST /api/documents/{id}/re-fetch-contratos.
+//     dentro del alert amarillo cuando hay 0 contratos.
 //
-// Formateo de fechas e importes: se hace server-side con filtros
-// Jinja2 (fecha_int_iso, importe_eur). El JS no formatea presentación.
+// Los inputs con data-field terminado en '_display' son read-only y
+// reflejan valores valorados (unidad, precio_unitario del contrato).
+// NO se envían al backend: collectLines() los ignora.
 
 (function () {
     "use strict";
 
     // --------------------------------------------------------------- //
-    // Mapa { codigo_contrato: pdf_sharepoint_web_url | null } construido
-    // a partir de la lista de pares [codigo, url] emitida por el template
-    // cuando hay varios contratos (Jinja2 no soporta dict-comprehensions,
-    // de ahí la indirección). Se usa para cambiar el href del botón
-    // "Abrir contrato en SharePoint" de la cabecera cuando el usuario
-    // cambia la selección del desplegable. Si hay 0 o 1 contratos el
-    // script-tag no se emite y pdfMap queda vacío.
+    // Mapa de PDFs por contrato (solo si hay varios)
     // --------------------------------------------------------------- //
     let contratosPdfMap = {};
     const pdfMapTag = document.getElementById("contratos-pdf-map");
@@ -32,7 +28,6 @@
             if (Array.isArray(pairs)) {
                 contratosPdfMap = Object.fromEntries(pairs);
             } else if (pairs && typeof pairs === "object") {
-                // Compat: por si alguien lo emite directamente como objeto.
                 contratosPdfMap = pairs;
             }
         } catch (exc) {
@@ -41,14 +36,6 @@
         }
     }
 
-    // Busca el botón "Abrir contrato en SharePoint" en la cabecera por
-    // su texto visible. Así no tenemos que añadir un id al template —
-    // el botón se identifica por lo que pone dentro.
-    //
-    // Devuelve null si el botón no existe (p.e. porque al cargar la
-    // página ningún contrato tenía PDF). En ese caso NO creamos el
-    // botón dinámicamente — haría falta recarga para verlo, que es
-    // justo lo que ya hace handleRefetchOutcome() tras un re-fetch.
     function findHeaderContratoBtn() {
         const anchors = document.querySelectorAll(".header-actions a");
         for (let i = 0; i < anchors.length; i++) {
@@ -60,13 +47,6 @@
         return null;
     }
 
-    // --------------------------------------------------------------- //
-    // Selector de contrato cuando hay varios.
-    //   - Muestra la card del contrato elegido, oculta las demás.
-    //   - Sincroniza el botón "Abrir contrato en SharePoint" de la
-    //     cabecera: cambia href al PDF del contrato seleccionado, o
-    //     oculta el botón si el contrato seleccionado no tiene PDF.
-    // --------------------------------------------------------------- //
     function wireContratoSelector() {
         const selector = document.getElementById("selected_contrato_codigo");
         if (!selector || selector.tagName !== "SELECT") return;
@@ -81,9 +61,6 @@
                 headerBtn.title = "Abrir el PDF del contrato " + codigo;
                 headerBtn.style.display = "";
             } else {
-                // No hay PDF para el contrato seleccionado (o no hay
-                // contrato seleccionado): ocultamos el botón. Al
-                // seleccionar otro contrato con PDF vuelve a aparecer.
                 headerBtn.style.display = "none";
             }
         }
@@ -95,9 +72,6 @@
             });
             syncHeaderBtn(codigo);
         });
-
-        // Sincronización inicial por si el botón del header apunta a
-        // un contrato y el usuario cambia inmediatamente de selección.
         syncHeaderBtn(selector.value);
     }
 
@@ -108,24 +82,20 @@
     // --------------------------------------------------------------- //
     const dataTag = document.getElementById("document-data");
     if (!dataTag) {
-        // Vista por proveedor (read-only) → no cableamos nada más.
-        return;
+        return; // vista read-only de proveedor
     }
 
-    let documentData = null;
-    try {
-        documentData = JSON.parse(dataTag.textContent);
-    } catch (exc) {
-        console.error("No se pudo parsear document-data JSON:", exc);
-        return;
-    }
+    const linesTable = document.getElementById("lines-table");
+    const linesBody = linesTable ? linesTable.querySelector("tbody") : null;
+    if (!linesBody) return;
 
     const documentId =
         (dataTag.dataset && dataTag.dataset.documentId) ||
         window.reviewDocumentId ||
-        documentData.id;
+        (function () {
+            try { return JSON.parse(dataTag.textContent).id; } catch (_) { return null; }
+        })();
 
-    const linesBody = document.querySelector("#lines-table tbody");
     const addLineBtn = document.getElementById("add-line-btn");
     const saveBtn = document.getElementById("save-btn");
     const approveBtn = document.getElementById("approve-btn");
@@ -133,47 +103,9 @@
     const refetchOnlyBtn = document.getElementById("refetch-only-btn");
     const refetchStatus = document.getElementById("refetch-status");
 
-    function lineToRow(line, index) {
-        const tr = document.createElement("tr");
-        tr.dataset.lineId = line.id !== null && line.id !== undefined ? String(line.id) : "";
-
-        function addCell(type, value, field) {
-            const td = document.createElement("td");
-            const input = document.createElement(type === "textarea" ? "textarea" : "input");
-            if (type !== "textarea") input.type = type;
-            input.dataset.field = field;
-            if (value !== null && value !== undefined) input.value = value;
-            td.appendChild(input);
-            tr.appendChild(td);
-        }
-
-        const idxCell = document.createElement("td");
-        idxCell.textContent = String(index + 1);
-        tr.appendChild(idxCell);
-
-        addCell("text", line.codigo_imputacion, "codigo_imputacion");
-        addCell("textarea", line.concepto, "concepto");
-        addCell("number", line.cantidad, "cantidad");
-        addCell("number", line.precio, "precio");
-        addCell("number", line.descuento, "descuento");
-        addCell("number", line.precio_neto, "precio_neto");
-        addCell("text", line.codigo, "codigo");
-
-        const actionsCell = document.createElement("td");
-        const rm = document.createElement("button");
-        rm.type = "button";
-        rm.className = "btn danger small";
-        rm.textContent = "Eliminar";
-        rm.addEventListener("click", function () {
-            tr.remove();
-            reindexRows();
-        });
-        actionsCell.appendChild(rm);
-        tr.appendChild(actionsCell);
-
-        return tr;
-    }
-
+    // --------------------------------------------------------------- //
+    // Renumerar la columna '#' tras añadir/eliminar filas.
+    // --------------------------------------------------------------- //
     function reindexRows() {
         const rows = linesBody.querySelectorAll("tr");
         rows.forEach(function (row, idx) {
@@ -182,36 +114,98 @@
         });
     }
 
-    function renderLines(lines) {
-        linesBody.innerHTML = "";
-        (lines || []).forEach(function (line, idx) {
-            linesBody.appendChild(lineToRow(line, idx));
-        });
+    // --------------------------------------------------------------- //
+    // Crear una fila nueva (usada al pulsar "Añadir línea"). Los campos
+    // de valoración ('unidad_display', 'precio_unitario_display') se
+    // crean readonly y vacíos: nunca habrá valoración para filas que
+    // acaba de añadir el usuario hasta que el servicio 6 vuelva a
+    // pasar (fuera del alcance de esta pasada).
+    // --------------------------------------------------------------- //
+    function buildEmptyRow(index) {
+        const tr = document.createElement("tr");
+        tr.dataset.lineId = "";
+
+        function cell(inner) {
+            const td = document.createElement("td");
+            td.appendChild(inner);
+            tr.appendChild(td);
+        }
+
+        function txt(field) {
+            const el = document.createElement("input");
+            el.type = "text";
+            el.dataset.field = field;
+            return el;
+        }
+        function num(field) {
+            const el = document.createElement("input");
+            el.type = "number";
+            el.step = "any";
+            el.dataset.field = field;
+            return el;
+        }
+        function area(field) {
+            const el = document.createElement("textarea");
+            el.dataset.field = field;
+            return el;
+        }
+        function ro(field) {
+            const el = document.createElement("input");
+            el.type = "text";
+            el.dataset.field = field;
+            el.readOnly = true;
+            el.className = "readonly-cell";
+            return el;
+        }
+
+        const idxCell = document.createElement("td");
+        idxCell.textContent = String(index + 1);
+        tr.appendChild(idxCell);
+
+        cell(txt("codigo_imputacion"));
+        cell(area("concepto"));
+        cell(num("cantidad"));
+        cell(ro("unidad_display"));
+        cell(ro("precio_unitario_display"));
+        cell(num("precio"));
+        cell(num("descuento"));
+        cell(num("precio_neto"));
+        cell(txt("codigo"));
+
+        const actionsTd = document.createElement("td");
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "btn danger small js-remove-line";
+        btn.textContent = "Eliminar";
+        actionsTd.appendChild(btn);
+        tr.appendChild(actionsTd);
+
+        return tr;
     }
 
-    renderLines(documentData.lines);
+    // Delegación: clicks en botones "Eliminar" (pintados por el servidor
+    // o por buildEmptyRow).
+    linesBody.addEventListener("click", function (evt) {
+        const target = evt.target;
+        if (target && target.classList && target.classList.contains("js-remove-line")) {
+            const tr = target.closest("tr");
+            if (tr) {
+                tr.remove();
+                reindexRows();
+            }
+        }
+    });
 
     if (addLineBtn) {
         addLineBtn.addEventListener("click", function () {
-            const row = lineToRow(
-                {
-                    id: null,
-                    codigo_imputacion: "",
-                    concepto: "",
-                    cantidad: null,
-                    precio: null,
-                    descuento: null,
-                    precio_neto: null,
-                    codigo: "",
-                },
-                linesBody.querySelectorAll("tr").length
-            );
+            const row = buildEmptyRow(linesBody.querySelectorAll("tr").length);
             linesBody.appendChild(row);
             reindexRows();
         });
     }
 
     function readNumericOrNull(input) {
+        if (!input) return null;
         const value = (input.value || "").trim();
         if (!value) return null;
         const n = Number(value);
@@ -219,10 +213,16 @@
     }
 
     function readTextOrNull(input) {
+        if (!input) return null;
         const value = (input.value || "").trim();
         return value || null;
     }
 
+    // --------------------------------------------------------------- //
+    // Recolectar líneas para enviar al backend.
+    // Los campos 'unidad_display' y 'precio_unitario_display' se
+    // ignoran: son puramente informativos (vienen de la valoración).
+    // --------------------------------------------------------------- //
     function collectLines() {
         const out = [];
         const rows = linesBody.querySelectorAll("tr");
@@ -241,6 +241,7 @@
                 descuento: readNumericOrNull(byField.descuento),
                 precio_neto: readNumericOrNull(byField.precio_neto),
                 codigo: readTextOrNull(byField.codigo),
+                // 'unidad_display' y 'precio_unitario_display' NO se envían.
             });
         });
         return out;
@@ -292,11 +293,6 @@
             } catch (_) {}
             alert("Error al guardar: " + detail);
             return false;
-        }
-        if (markApproved) {
-            const body = await response.json();
-            window.location.href = body.redirect_url;
-            return true;
         }
         const body = await response.json();
         window.location.href = body.redirect_url;
@@ -358,7 +354,6 @@
                 setButtonsDisabled(false);
                 return;
             }
-
             paintStatus("info", "Consultando ERP…");
             const outcome = await refetchContratos();
             handleRefetchOutcome(outcome);
@@ -390,23 +385,13 @@
         }[outcome.status] || "info";
 
         paintStatus(kind, outcome.message || "Sin mensaje.");
-
-        // Si hemos encontrado contratos, recargamos para pintar la card
-        // (o el desplegable) y para que el botón del header aparezca
-        // con el href correcto.
         if (outcome.count > 0) {
-            setTimeout(function () {
-                window.location.reload();
-            }, 700);
+            setTimeout(function () { window.location.reload(); }, 700);
             return;
         }
         setButtonsDisabled(false);
     }
 
-    if (saveAndRefetchBtn) {
-        saveAndRefetchBtn.addEventListener("click", handleSaveAndRefetch);
-    }
-    if (refetchOnlyBtn) {
-        refetchOnlyBtn.addEventListener("click", handleRefetchOnly);
-    }
+    if (saveAndRefetchBtn) saveAndRefetchBtn.addEventListener("click", handleSaveAndRefetch);
+    if (refetchOnlyBtn) refetchOnlyBtn.addEventListener("click", handleRefetchOnly);
 })();

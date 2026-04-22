@@ -20,6 +20,14 @@
     {% endfor %}
 {% endif %}
 
+{#
+    Helper para buscar la valoración de una línea (por merge_line_id).
+    Pydantic serializa las keys int del dict como str en JSON, pero en
+    Python sigue siendo int. Jinja2 accede como atributo `.lines_by_merge_line_id`.
+#}
+{% set valuation = document.valuation %}
+{% set val_lines = valuation.lines_by_merge_line_id if valuation else {} %}
+
 {% block content %}
 <section class="page-header detail-header">
     <div>
@@ -75,6 +83,25 @@
     </div>
 {% endif %}
 
+{# =========================================================== #}
+{#  Banner de VALORACIÓN                                        #}
+{# =========================================================== #}
+{% if valuation %}
+    <div class="alert info">
+        <strong>Albarán valorado</strong>
+        · Contrato aplicado: <code>{{ valuation.contrato_codigo or '—' }}</code>
+        · Total valorado: <strong>{{ valuation.total_valorado | importe_eur }}</strong>
+        · Líneas: {{ valuation.total_lines }}
+        (exacto: {{ valuation.lines_matched_exact }},
+         semántico: {{ valuation.lines_matched_semantic }},
+         precio-solo: {{ valuation.lines_matched_price_only }},
+         sin match: {{ valuation.lines_unmatched }})
+        {% if valuation.review_required %}
+            · <strong>Requiere revisión</strong>
+        {% endif %}
+    </div>
+{% endif %}
+
 <section class="split-layout">
     <aside class="panel viewer-panel">
         <div class="panel-header">
@@ -91,20 +118,6 @@
             </div>
         </div>
         {% if preview_enabled %}
-            {#
-                Fragmento del iframe:
-                - navpanes=0: OCULTA el panel lateral de miniaturas del visor
-                  PDF del navegador (es el que el usuario quería quitar).
-                  Respetado en Chrome/Edge. Firefox usa otro visor que
-                  ignora este parámetro — si usas Firefox, la miniatura
-                  seguirá apareciendo aunque pequeña por el ancho reducido
-                  del panel en styles.css.
-                - toolbar=1: mantiene la barra de herramientas superior.
-                - scrollbar=1: scroll vertical dentro del PDF.
-                - pagemode=none: refuerza el ocultamiento de paneles.
-                - view=FitH: ajusta al ancho para que el albarán se lea
-                  sin tener que hacer zoom manual.
-            #}
             <iframe class="document-frame"
                     src="{{ document_preview_url }}#toolbar=1&navpanes=0&scrollbar=1&pagemode=none&view=FitH"></iframe>
         {% elif document.document_url %}
@@ -140,9 +153,6 @@
             </div>
 
             {% if document.contratos|length == 0 %}
-                {# ============================================================== #}
-                {# CASO 0 contratos — alert + acciones de re-búsqueda manual      #}
-                {# ============================================================== #}
                 <div class="alert warning contrato-empty">
                     <div class="contrato-empty-text">
                         No se encontró ningún contrato en el ERP para la combinación
@@ -194,11 +204,6 @@
                                 <dd>{{ c.importe_total | importe_eur }}</dd>
                             </div>
                         </div>
-                        {#
-                            Si el contrato NO tiene PDF mostramos aviso sutil
-                            dentro de la tarjeta. Si lo tiene, el botón está
-                            arriba en la cabecera junto al de abrir albarán.
-                        #}
                         {% if not c.pdf_sharepoint_web_url %}
                             <div class="contrato-actions">
                                 <span class="contrato-no-pdf muted small">
@@ -259,12 +264,6 @@
                                         <dd>{{ c.importe_total | importe_eur }}</dd>
                                     </div>
                                 </div>
-                                {#
-                                    Aviso sutil SOLO si el contrato seleccionado
-                                    no tiene PDF. El botón de abrir PDF vive en
-                                    la cabecera y cambia de contrato al cambiar
-                                    la selección (ver static/app.js).
-                                #}
                                 {% if not c.pdf_sharepoint_web_url %}
                                     <div class="contrato-actions">
                                         <span class="contrato-no-pdf muted small">
@@ -333,9 +332,33 @@
                 </div>
 
                 <div class="subsection-header">
-                    <h3>Líneas</h3>
+                    <h3>
+                        Líneas
+                        {% if valuation %}
+                            <span class="muted small">· valores de valoración aplicados</span>
+                        {% endif %}
+                    </h3>
                     <button type="button" class="btn secondary small" id="add-line-btn">Añadir línea</button>
                 </div>
+
+                {#
+                    Tabla editable de líneas.
+                    - El <tbody> se renderiza desde aquí en servidor para que
+                      cada línea mezcle los valores extraídos con los
+                      valorados cuando existan. Antes la poblaba JS; ahora
+                      el JS solo se ocupa del alta/baja de filas y del save.
+                    - Columnas NUEVAS: 'Unidad' y 'Precio unitario' (del
+                      contrato, read-only). Si no hay valoración se quedan
+                      vacías.
+                    - Las columnas 'Cantidad', 'Precio' e 'Importe' (antes
+                      llamada 'Precio neto') muestran el valor VALORADO
+                      cuando existe; si no, el extraído del albarán.
+                    - Los inputs mantienen el campo original para no romper
+                      el guardado: lo que el usuario toque se persistirá
+                      como antes. Los inputs cuyo valor venga del valorado
+                      se marcan con class='valued' para darles un leve
+                      tono distinto.
+                #}
                 <div class="table-scroll">
                     <table class="table editable-table" id="lines-table">
                         <thead>
@@ -344,14 +367,84 @@
                             <th>Código imputación</th>
                             <th>Concepto</th>
                             <th>Cantidad</th>
+                            <th>Unidad</th>
+                            <th>Precio unitario</th>
                             <th>Precio</th>
                             <th>Descuento</th>
-                            <th>Precio neto</th>
+                            <th>Importe</th>
                             <th>Código</th>
                             <th></th>
                         </tr>
                         </thead>
-                        <tbody></tbody>
+                        <tbody>
+                        {% for line in document.lines %}
+                            {% set v = val_lines.get(line.id) if line.id is not none else none %}
+                            {# Valores efectivos a mostrar: priorizar valoración cuando exista. #}
+                            {% set eff_codimp = (v.codigo_partida_final if v and v.codigo_partida_final) or line.codigo_imputacion %}
+                            {% set eff_cantidad = (v.cantidad_convertida if v and v.cantidad_convertida is not none else line.cantidad) %}
+                            {% set eff_unidad = (v.unidad_contrato if v and v.unidad_contrato) or (v.unidad_albaran if v else '') %}
+                            {% set eff_precio_unit = (v.precio_unitario_final if v else none) %}
+                            {% set eff_importe = (v.importe_calculado if v and v.importe_calculado is not none else line.precio_neto) %}
+                            <tr data-line-id="{{ line.id if line.id is not none else '' }}">
+                                <td>{{ loop.index }}</td>
+                                <td>
+                                    <input type="text"
+                                           data-field="codigo_imputacion"
+                                           value="{{ eff_codimp or '' }}"
+                                           {% if v and v.codigo_partida_final %}class="valued"{% endif %}>
+                                </td>
+                                <td>
+                                    <textarea data-field="concepto">{{ line.concepto or '' }}</textarea>
+                                </td>
+                                <td>
+                                    <input type="number" step="any"
+                                           data-field="cantidad"
+                                           value="{{ eff_cantidad if eff_cantidad is not none else '' }}"
+                                           {% if v and v.cantidad_convertida is not none %}class="valued"{% endif %}>
+                                </td>
+                                <td>
+                                    {# Unidad NO se guarda en el albarán-merge; readonly. #}
+                                    <input type="text"
+                                           data-field="unidad_display"
+                                           value="{{ eff_unidad or '' }}"
+                                           readonly
+                                           class="readonly-cell{% if v and v.unidad_contrato %} valued{% endif %}">
+                                </td>
+                                <td>
+                                    {# Precio unitario (del contrato) NO se guarda; readonly. #}
+                                    <input type="number" step="any"
+                                           data-field="precio_unitario_display"
+                                           value="{{ eff_precio_unit if eff_precio_unit is not none else '' }}"
+                                           readonly
+                                           class="readonly-cell{% if eff_precio_unit is not none %} valued{% endif %}">
+                                </td>
+                                <td>
+                                    <input type="number" step="any"
+                                           data-field="precio"
+                                           value="{{ line.precio if line.precio is not none else '' }}">
+                                </td>
+                                <td>
+                                    <input type="number" step="any"
+                                           data-field="descuento"
+                                           value="{{ line.descuento if line.descuento is not none else '' }}">
+                                </td>
+                                <td>
+                                    <input type="number" step="any"
+                                           data-field="precio_neto"
+                                           value="{{ eff_importe if eff_importe is not none else '' }}"
+                                           {% if v and v.importe_calculado is not none %}class="valued"{% endif %}>
+                                </td>
+                                <td>
+                                    <input type="text"
+                                           data-field="codigo"
+                                           value="{{ line.codigo or '' }}">
+                                </td>
+                                <td>
+                                    <button type="button" class="btn danger small js-remove-line">Eliminar</button>
+                                </td>
+                            </tr>
+                        {% endfor %}
+                        </tbody>
                     </table>
                 </div>
             </form>
@@ -383,23 +476,33 @@
                         <th>Código imputación</th>
                         <th>Concepto</th>
                         <th>Cantidad</th>
+                        <th>Unidad</th>
+                        <th>Precio unitario</th>
                         <th>Precio</th>
                         <th>Descuento</th>
-                        <th>Precio neto</th>
+                        <th>Importe</th>
                         <th>Código</th>
                         <th>Confianza</th>
                     </tr>
                     </thead>
                     <tbody>
                     {% for line in document.lines %}
+                        {% set v = val_lines.get(line.id) if line.id is not none else none %}
+                        {% set eff_codimp = (v.codigo_partida_final if v and v.codigo_partida_final) or line.codigo_imputacion %}
+                        {% set eff_cantidad = (v.cantidad_convertida if v and v.cantidad_convertida is not none else line.cantidad) %}
+                        {% set eff_unidad = (v.unidad_contrato if v and v.unidad_contrato) or (v.unidad_albaran if v else '') %}
+                        {% set eff_precio_unit = (v.precio_unitario_final if v else none) %}
+                        {% set eff_importe = (v.importe_calculado if v and v.importe_calculado is not none else line.precio_neto) %}
                         <tr>
                             <td>{{ loop.index }}</td>
-                            <td>{{ line.codigo_imputacion or '—' }}</td>
+                            <td>{{ eff_codimp or '—' }}</td>
                             <td>{{ line.concepto or '—' }}</td>
-                            <td>{{ line.cantidad if line.cantidad is not none else '—' }}</td>
+                            <td>{{ eff_cantidad if eff_cantidad is not none else '—' }}</td>
+                            <td>{{ eff_unidad or '—' }}</td>
+                            <td>{{ eff_precio_unit if eff_precio_unit is not none else '—' }}</td>
                             <td>{{ line.precio if line.precio is not none else '—' }}</td>
                             <td>{{ line.descuento if line.descuento is not none else '—' }}</td>
-                            <td>{{ line.precio_neto if line.precio_neto is not none else '—' }}</td>
+                            <td>{{ eff_importe if eff_importe is not none else '—' }}</td>
                             <td>{{ line.codigo or '—' }}</td>
                             <td>
                                 {% if line.confianza_pct is not none %}
@@ -408,7 +511,7 @@
                             </td>
                         </tr>
                     {% else %}
-                        <tr><td colspan="9" class="empty-cell">Sin líneas para este proveedor.</td></tr>
+                        <tr><td colspan="11" class="empty-cell">Sin líneas para este proveedor.</td></tr>
                     {% endfor %}
                     </tbody>
                 </table>
@@ -465,17 +568,6 @@
     </section>
 </section>
 
-{#
-    Mapa de PDFs por código de contrato, consumido por static/app.js
-    para actualizar el botón 'Abrir contrato en SharePoint' de la
-    cabecera cuando el usuario cambia el contrato seleccionado en el
-    desplegable (caso de múltiples contratos).
-
-    Jinja2 no soporta list/dict comprehensions inline como Python.
-    Construimos una lista de pares [codigo, url] con un bucle explícito
-    sobre un namespace mutable. En app.js hacemos Object.fromEntries(pares)
-    para obtener el diccionario.
-#}
 {% if document.contratos|length > 1 %}
     {% set ns = namespace(pairs=[]) %}
     {% for c in document.contratos %}

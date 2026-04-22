@@ -104,21 +104,6 @@ class MergeLinePayload(BaseModel):
 
 
 class ContratoPayload(BaseModel):
-    """Datos de un contrato asociado al (proveedor, obra) del documento.
-
-    Los tipos numéricos ``fecha_*`` vienen como INT YYYYMMDD (p.e.
-    20241122) — la capa de presentación los formatea a DD/MM/YYYY. Un
-    valor de ``0`` en vigencia significa "sin vigencia establecida".
-
-    ``pdf_sharepoint_relative_path`` y ``pdf_sharepoint_web_url`` son
-    la ubicación del PDF del contrato ya descargado de Sigrid y subido
-    a SharePoint por el enrichment (servicio 3 automáticamente, o
-    servicio 4 durante un re-fetch manual). Ambos pueden ser ``None``
-    si el contrato no tiene PDF vinculado en el ERP, o si todavía no
-    se ha subido. El portal usa ``pdf_sharepoint_web_url`` para pintar
-    el botón 'Abrir contrato' en la vista de detalle del albarán.
-    """
-
     id: int
     codigo_contrato: str
     nombre_contrato: str | None = None
@@ -144,13 +129,77 @@ class MergeDocumentUpdatePayload(BaseModel):
     obra_codigo: str | None = None
     obra_nombre: str | None = None
     obra_direccion: str | None = None
-    # Contrato seleccionado por el usuario. None = sin seleccionar.
-    # Se valida contra los contratos cargados del documento al guardar.
     selected_contrato_codigo: str | None = None
     review_notes: str | None = None
     approved: bool = False
     approved_by: str | None = None
     lines: list[MergeLinePayload] = Field(default_factory=list)
+
+
+# ====================================================================== #
+# NUEVO — bloque de VALORACIÓN.
+#
+# Se rellena cuando existe una fila en ``albaran_valuations`` para el
+# document_id. Si no hay valoración todavía, ``valuation=None`` y el
+# front pinta los campos con los valores extraídos del albarán (como
+# antes). No añade UI de edición/relanzado — solo lectura.
+# ====================================================================== #
+
+class LineValuationPayload(BaseModel):
+    """Una fila de ``albaran_line_valuations`` (servicio 6)."""
+
+    merge_line_id: int
+    matched_contrato_line_id: int | None = None
+    derived_contrato_line_id: int | None = None
+
+    precio_unitario_contrato_db: float | None = None
+    precio_unitario_pdf_inferido: float | None = None
+    precio_unitario_final: float | None = None
+    precio_unitario_source: str | None = None
+    precio_unitario_agreement: str | None = None
+
+    unidad_albaran: str | None = None
+    unidad_contrato: str | None = None
+    unidad_categoria: str | None = None
+    unidad_category_match: bool | None = None
+
+    cantidad_albaran: float | None = None
+    cantidad_convertida: float | None = None
+    factor_conversion: float | None = None
+
+    importe_calculado: float | None = None
+    importe_albaran_declarado: float | None = None
+    importe_source: str | None = None
+
+    codigo_partida_albaran: str | None = None
+    codigo_partida_final: str | None = None
+    partida_action: str | None = None
+
+    match_confidence_pct: float | None = None
+    match_method: str | None = None
+    review_required: bool | None = None
+
+
+class ValuationPayload(BaseModel):
+    """Cabecera + mapa ``merge_line_id -> LineValuationPayload``."""
+
+    valuation_id: str
+    contrato_codigo: str | None = None
+    status: str
+    provider_ia: str | None = None
+    model_name: str | None = None
+    total_valorado: float = 0.0
+    total_lines: int = 0
+    lines_matched_exact: int = 0
+    lines_matched_semantic: int = 0
+    lines_matched_price_only: int = 0
+    lines_unmatched: int = 0
+    review_required: bool = False
+    created_at_utc: str | None = None
+    updated_at_utc: str | None = None
+    lines_by_merge_line_id: dict[int, LineValuationPayload] = Field(
+        default_factory=dict,
+    )
 
 
 class DocumentDetailPayload(BaseModel):
@@ -187,9 +236,10 @@ class DocumentDetailPayload(BaseModel):
     created_at_utc: str
     lines: list[MergeLinePayload] = Field(default_factory=list)
     provider_snapshots: list[ProviderSnapshot] = Field(default_factory=list)
-    # Bloque de contratos enriquecidos por el servicio 3 desde la BBDD on-prem.
     contratos: list[ContratoPayload] = Field(default_factory=list)
     selected_contrato_codigo: str | None = None
+    # NUEVO — None mientras no exista valoración en BBDD.
+    valuation: ValuationPayload | None = None
 
 
 class PaginatedDocuments(BaseModel):
@@ -225,6 +275,4 @@ def normalize_view_mode(value: str | None) -> str:
     cleaned = str(value).strip().lower()
     if cleaned in ALLOWED_VIEW_MODES:
         return cleaned
-    # Permitir cualquier provider_origin futuro (azure_di, etc.). La
-    # validación real contra datos reales la hace el repositorio.
     return cleaned or VIEW_MODE_MERGE

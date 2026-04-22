@@ -15,10 +15,12 @@ from domain.models.review_models import (
     DocumentListFilters,
     DocumentListItem,
     KNOWN_PROVIDER_VIEWS,
+    LineValuationPayload,
     MergeDocumentUpdatePayload,
     MergeLinePayload,
     PaginatedDocuments,
     ProviderSnapshot,
+    ValuationPayload,
     VIEW_MODE_MERGE,
     normalize_view_mode,
 )
@@ -39,18 +41,41 @@ class AlbaranReviewRepository:
         self._initialized = False
 
     def initialize(self) -> bool:
-        if self._initialized:
-            return self._tables_ready()
+        """Inicialización idempotente y robusta.
 
+        Ejecuta los DDLs de compatibilidad del servicio 4 (añade
+        columnas ``approved``, ``approved_at_utc``, etc., crea índices,
+        etc.) sobre las tablas que ya creó el servicio 3.
+
+        IMPORTANTE: sólo marcamos ``self._initialized = True`` CUANDO
+        los DDLs se ejecutan con éxito. Si las tablas del servicio 3
+        todavía no existen cuando arrancamos, devolvemos False y
+        dejamos ``_initialized = False`` para reintentar en la próxima
+        llamada (la primera GET /documents, por ejemplo).
+
+        Antes, si el svc4 arrancaba antes que el svc3 creara las
+        tablas, marcábamos initialized=True sin haber ejecutado nada,
+        y cuando el svc3 ya había creado las tablas después, el svc4
+        nunca llegaba a añadir sus columnas → la primera query cascaba
+        por 'no existe columna approved'.
+        """
+        if self._initialized and self._tables_ready():
+            return True
+
+        # Rename legacy tables si existieran.
         self._rename_legacy_tables_if_needed()
+
+        # Si las tablas del servicio 3 todavía no existen, no podemos
+        # aplicar los ALTER. Devolvemos False (no cacheamos) para que
+        # la próxima llamada reintente.
         if not self._tables_ready():
-            self._initialized = True
             return False
 
         with self._session_factory.create_session() as session:
             for ddl in self._review_schema_statements():
                 session.execute(text(ddl))
             session.commit()
+
         self._initialized = True
         return True
 
@@ -294,6 +319,12 @@ class AlbaranReviewRepository:
                 for item in provider_docs
             ]
 
+            # NUEVO: leer valoración (si existe) en la misma sesión.
+            valuation_payload = self._load_valuation_in_session(
+                session=session,
+                document_id=merge_doc.id,
+            )
+
             if normalized_view == VIEW_MODE_MERGE:
                 return self._build_merge_detail(
                     merge_doc=merge_doc,
@@ -301,6 +332,7 @@ class AlbaranReviewRepository:
                     provider_snapshots=provider_snapshots_payload,
                     contratos=contratos_payload,
                     selected_contrato_codigo=selected_contrato_codigo,
+                    valuation=valuation_payload,
                 )
 
             provider_doc = next(
@@ -314,6 +346,7 @@ class AlbaranReviewRepository:
                     provider_snapshots=provider_snapshots_payload,
                     contratos=contratos_payload,
                     selected_contrato_codigo=selected_contrato_codigo,
+                    valuation=valuation_payload,
                 )
 
             provider_lines = session.scalars(
@@ -331,7 +364,122 @@ class AlbaranReviewRepository:
                 view_mode=normalized_view,
                 contratos=contratos_payload,
                 selected_contrato_codigo=selected_contrato_codigo,
+                valuation=valuation_payload,
             )
+
+    # ------------------------------------------------------------------ #
+    # NUEVO: lectura de valoración desde las tablas del servicio 6.
+    # SQL crudo para no acoplarnos al ORM del 6 dentro del servicio 4.
+    # Si las tablas no existen (p.e. BBDD vieja) devuelve None sin
+    # romper la carga del detalle.
+    # ------------------------------------------------------------------ #
+    def _load_valuation_in_session(
+        self,
+        *,
+        session: Any,
+        document_id: str,
+    ) -> ValuationPayload | None:
+        try:
+            header_row = session.execute(
+                text(
+                    "SELECT id, contrato_codigo, status, provider_ia, "
+                    "       model_name, total_valorado, total_lines, "
+                    "       lines_matched_exact, lines_matched_semantic, "
+                    "       lines_matched_price_only, lines_unmatched, "
+                    "       review_required, created_at_utc, updated_at_utc "
+                    "FROM albaran_valuations "
+                    "WHERE document_id = :doc_id "
+                    "LIMIT 1"
+                ),
+                {"doc_id": document_id},
+            ).mappings().first()
+        except Exception:
+            # Tabla puede no existir (BBDD antigua).
+            session.rollback()
+            return None
+
+        if header_row is None:
+            return None
+
+        valuation_id = str(header_row["id"])
+
+        try:
+            line_rows = session.execute(
+                text(
+                    "SELECT merge_line_id, matched_contrato_line_id, "
+                    "       derived_contrato_line_id, "
+                    "       precio_unitario_contrato_db, "
+                    "       precio_unitario_pdf_inferido, "
+                    "       precio_unitario_final, precio_unitario_source, "
+                    "       precio_unitario_agreement, "
+                    "       unidad_albaran, unidad_contrato, "
+                    "       unidad_categoria, unidad_category_match, "
+                    "       cantidad_albaran, cantidad_convertida, "
+                    "       factor_conversion, "
+                    "       importe_calculado, importe_albaran_declarado, "
+                    "       importe_source, "
+                    "       codigo_partida_albaran, codigo_partida_final, "
+                    "       partida_action, "
+                    "       match_confidence_pct, match_method, "
+                    "       review_required "
+                    "FROM albaran_line_valuations "
+                    "WHERE valuation_id = :vid"
+                ),
+                {"vid": valuation_id},
+            ).mappings().all()
+        except Exception:
+            session.rollback()
+            line_rows = []
+
+        lines_by_id: dict[int, LineValuationPayload] = {}
+        for row in line_rows:
+            merge_line_id = int(row["merge_line_id"])
+            lines_by_id[merge_line_id] = LineValuationPayload(
+                merge_line_id=merge_line_id,
+                matched_contrato_line_id=row["matched_contrato_line_id"],
+                derived_contrato_line_id=row["derived_contrato_line_id"],
+                precio_unitario_contrato_db=row["precio_unitario_contrato_db"],
+                precio_unitario_pdf_inferido=row["precio_unitario_pdf_inferido"],
+                precio_unitario_final=row["precio_unitario_final"],
+                precio_unitario_source=row["precio_unitario_source"],
+                precio_unitario_agreement=row["precio_unitario_agreement"],
+                unidad_albaran=row["unidad_albaran"],
+                unidad_contrato=row["unidad_contrato"],
+                unidad_categoria=row["unidad_categoria"],
+                unidad_category_match=row["unidad_category_match"],
+                cantidad_albaran=row["cantidad_albaran"],
+                cantidad_convertida=row["cantidad_convertida"],
+                factor_conversion=row["factor_conversion"],
+                importe_calculado=row["importe_calculado"],
+                importe_albaran_declarado=row["importe_albaran_declarado"],
+                importe_source=row["importe_source"],
+                codigo_partida_albaran=row["codigo_partida_albaran"],
+                codigo_partida_final=row["codigo_partida_final"],
+                partida_action=row["partida_action"],
+                match_confidence_pct=row["match_confidence_pct"],
+                match_method=row["match_method"],
+                review_required=row["review_required"],
+            )
+
+        return ValuationPayload(
+            valuation_id=valuation_id,
+            contrato_codigo=header_row["contrato_codigo"],
+            status=str(header_row["status"]),
+            provider_ia=header_row["provider_ia"],
+            model_name=header_row["model_name"],
+            total_valorado=float(header_row["total_valorado"] or 0.0),
+            total_lines=int(header_row["total_lines"] or 0),
+            lines_matched_exact=int(header_row["lines_matched_exact"] or 0),
+            lines_matched_semantic=int(header_row["lines_matched_semantic"] or 0),
+            lines_matched_price_only=int(
+                header_row["lines_matched_price_only"] or 0
+            ),
+            lines_unmatched=int(header_row["lines_unmatched"] or 0),
+            review_required=bool(header_row["review_required"]),
+            created_at_utc=header_row["created_at_utc"],
+            updated_at_utc=header_row["updated_at_utc"],
+            lines_by_merge_line_id=lines_by_id,
+        )
 
     def _build_merge_detail(
         self,
@@ -341,6 +489,7 @@ class AlbaranReviewRepository:
         provider_snapshots: list[ProviderSnapshot],
         contratos: list[ContratoPayload],
         selected_contrato_codigo: str | None,
+        valuation: ValuationPayload | None = None,
     ) -> DocumentDetailPayload:
         return DocumentDetailPayload(
             id=merge_doc.id,
@@ -378,6 +527,7 @@ class AlbaranReviewRepository:
             provider_snapshots=provider_snapshots,
             contratos=contratos,
             selected_contrato_codigo=selected_contrato_codigo,
+            valuation=valuation,
         )
 
     def _build_provider_detail(
@@ -391,6 +541,7 @@ class AlbaranReviewRepository:
         view_mode: str,
         contratos: list[ContratoPayload],
         selected_contrato_codigo: str | None,
+        valuation: ValuationPayload | None = None,
     ) -> DocumentDetailPayload:
         return DocumentDetailPayload(
             id=merge_doc.id,
@@ -429,6 +580,7 @@ class AlbaranReviewRepository:
             provider_snapshots=provider_snapshots,
             contratos=contratos,
             selected_contrato_codigo=selected_contrato_codigo,
+            valuation=valuation,
         )
 
     def get_merge_cif_and_obra(
@@ -617,14 +769,59 @@ class AlbaranReviewRepository:
                 document.approved_at_utc = None
                 document.approved_by = None
 
-            session.execute(
-                delete(AlbaranLineMergeOrm).where(
-                    AlbaranLineMergeOrm.document_id == document.id,
+            # -------------------------------------------------------- #
+            # Persistencia de líneas — UPDATE IN-PLACE (no delete+insert).
+            #
+            # Importante: las valoraciones del servicio 6 (tabla
+            # albaran_line_valuations) tienen FK
+            #   merge_line_id -> albaran_lines_merge.id ON DELETE CASCADE
+            # Si borráramos y reinsertáramos las líneas merge, la
+            # valoración entera se perdería en cada save. Por eso:
+            #   - Las líneas con id conocido se UPDATE en su sitio.
+            #   - Las líneas nuevas (sin id) se INSERT.
+            #   - Las líneas que estaban y el revisor eliminó (ya no
+            #     vienen en el payload) se DELETE explícitamente.
+            # Así los ids sobreviven y la valoración asociada también.
+            # -------------------------------------------------------- #
+            incoming_ids: set[int] = {
+                int(line.id)
+                for line in payload.lines
+                if line.id is not None
+            }
+
+            # (a) borrar sólo las líneas que desaparecieron
+            existing_rows = session.scalars(
+                select(AlbaranLineMergeOrm).where(
+                    AlbaranLineMergeOrm.document_id == document.id
                 )
-            )
+            ).all()
+            for row in existing_rows:
+                if row.id not in incoming_ids:
+                    session.delete(row)
             session.flush()
 
+            # (b) update in-place + insert de nuevas
             for index, line in enumerate(payload.lines, start=1):
+                if line.id is not None:
+                    existing = session.get(AlbaranLineMergeOrm, int(line.id))
+                    if existing is not None and existing.document_id == document.id:
+                        existing.line_index = index
+                        existing.external_line_id = self._clean_text(line.external_line_id)
+                        existing.cabecera_id = self._clean_text(line.cabecera_id)
+                        existing.codigo = self._clean_text(line.codigo)
+                        existing.cantidad = line.cantidad
+                        existing.concepto = self._clean_text(line.concepto)
+                        existing.precio = line.precio
+                        existing.descuento = line.descuento
+                        existing.precio_neto = line.precio_neto
+                        existing.codigo_imputacion = self._clean_text(line.codigo_imputacion)
+                        existing.confianza_pct = line.confianza_pct
+                        existing.confidence_pct_calc = line.confidence_pct_calc
+                        existing.line_match_score = line.line_match_score
+                        existing.comparison_status_json = line.comparison_status_json
+                        existing.field_scores_json = line.field_scores_json
+                        continue
+                # línea nueva o id no válido -> insert
                 session.add(
                     AlbaranLineMergeOrm(
                         document_id=document.id,
@@ -646,6 +843,26 @@ class AlbaranReviewRepository:
                         field_scores_json=line.field_scores_json,
                     )
                 )
+            session.flush()
+
+            # -------------------------------------------------------- #
+            # Recalcular importe_calculado en las líneas valoradas que
+            # sobreviven. Fórmula: precio_unitario_final * cantidad
+            # efectiva, donde cantidad efectiva =
+            #   cantidad_convertida (si hay factor_conversion)
+            #   ELSE cantidad_albaran nueva (la que acaba de editar el
+            #        revisor).
+            # También actualizamos total_valorado en la cabecera.
+            # -------------------------------------------------------- #
+            self._recalc_valuation_importes(
+                session=session,
+                document_id=document.id,
+                new_line_quantities={
+                    int(line.id): line.cantidad
+                    for line in payload.lines
+                    if line.id is not None and line.cantidad is not None
+                },
+            )
 
             session.commit()
 
@@ -653,6 +870,126 @@ class AlbaranReviewRepository:
         if detail is None:
             raise KeyError(f"Documento no encontrado tras guardar: {document_id}")
         return detail
+
+    # ------------------------------------------------------------------ #
+    # Recálculo de importes en la valoración tras guardar cambios del
+    # revisor. Tolerante a ausencia de la valoración (no pasa nada si
+    # todavía no existe para este documento).
+    # ------------------------------------------------------------------ #
+    def _recalc_valuation_importes(
+        self,
+        *,
+        session: Any,
+        document_id: str,
+        new_line_quantities: dict[int, float],
+    ) -> None:
+        try:
+            val_row = session.execute(
+                text(
+                    "SELECT id FROM albaran_valuations "
+                    "WHERE document_id = :doc_id"
+                ),
+                {"doc_id": document_id},
+            ).mappings().first()
+        except Exception:
+            # Tabla puede no existir en BBDD antiguas.
+            session.rollback()
+            return
+        if val_row is None:
+            return
+        valuation_id = str(val_row["id"])
+
+        # Cargar líneas de la valoración (pu_final + factor_conversion
+        # + cantidad actual). Sólo procesamos las que tengan pu_final.
+        try:
+            line_rows = session.execute(
+                text(
+                    "SELECT id, merge_line_id, precio_unitario_final, "
+                    "       factor_conversion, cantidad_albaran, "
+                    "       cantidad_convertida, importe_source "
+                    "FROM albaran_line_valuations "
+                    "WHERE valuation_id = :vid"
+                ),
+                {"vid": valuation_id},
+            ).mappings().all()
+        except Exception:
+            session.rollback()
+            return
+
+        for row in line_rows:
+            pu = row["precio_unitario_final"]
+            if pu is None:
+                continue
+
+            merge_line_id = int(row["merge_line_id"])
+
+            # Cantidad a usar: la nueva editada por el revisor (si
+            # tenemos en el payload), si no la actual de la fila.
+            if merge_line_id in new_line_quantities:
+                nueva_cant_albaran: float | None = float(
+                    new_line_quantities[merge_line_id]
+                )
+            else:
+                existing_ca = row["cantidad_albaran"]
+                nueva_cant_albaran = (
+                    float(existing_ca) if existing_ca is not None else None
+                )
+
+            factor = row["factor_conversion"]
+            if factor is not None and nueva_cant_albaran is not None:
+                nueva_cant_conv: float | None = float(factor) * nueva_cant_albaran
+            else:
+                nueva_cant_conv = None
+
+            cantidad_efectiva = (
+                nueva_cant_conv
+                if nueva_cant_conv is not None
+                else nueva_cant_albaran
+            )
+            if cantidad_efectiva is None:
+                continue
+
+            nuevo_importe = round(float(pu) * float(cantidad_efectiva), 2)
+
+            # Si antes era 'declared_albaran' respetamos esa semántica
+            # (el albarán lo traía explícito), pero igualmente sobre-
+            # escribimos con el nuevo calculado si el revisor cambió
+            # cantidad — tiene más autoridad. importe_source queda
+            # como 'calculated' cuando el revisor ha intervenido.
+            new_src = "calculated"
+
+            session.execute(
+                text(
+                    "UPDATE albaran_line_valuations "
+                    "SET cantidad_albaran = :ca, "
+                    "    cantidad_convertida = :cc, "
+                    "    importe_calculado = :imp, "
+                    "    importe_source = :src "
+                    "WHERE id = :vid"
+                ),
+                {
+                    "ca": nueva_cant_albaran,
+                    "cc": nueva_cant_conv,
+                    "imp": nuevo_importe,
+                    "src": new_src,
+                    "vid": int(row["id"]),
+                },
+            )
+
+        # Total de la cabecera.
+        session.execute(
+            text(
+                "UPDATE albaran_valuations SET "
+                "total_valorado = COALESCE(("
+                "  SELECT SUM(importe_calculado) "
+                "  FROM albaran_line_valuations "
+                "  WHERE valuation_id = albaran_valuations.id"
+                "), 0), "
+                "updated_at_utc = :now "
+                "WHERE id = :vid"
+            ),
+            {"now": self._utc_iso(), "vid": valuation_id},
+        )
 
     def set_approved(
         self,
