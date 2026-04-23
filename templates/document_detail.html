@@ -369,9 +369,8 @@
                             <th>Cantidad</th>
                             <th>Unidad</th>
                             <th>Precio unitario</th>
-                            <th>Precio</th>
-                            <th>Descuento</th>
                             <th>Importe</th>
+                            <th>Descuento</th>
                             <th>Código</th>
                             <th></th>
                         </tr>
@@ -419,21 +418,29 @@
                                            class="readonly-cell{% if eff_precio_unit is not none %} valued{% endif %}">
                                 </td>
                                 <td>
+                                    {# Importe (antes precio_neto). Muestra el valorado si existe,
+                                       se edita y se persiste en albaran_lines_merge.precio_neto. #}
                                     <input type="number" step="any"
-                                           data-field="precio"
-                                           value="{{ line.precio if line.precio is not none else '' }}">
+                                           data-field="precio_neto"
+                                           value="{{ eff_importe if eff_importe is not none else '' }}"
+                                           {% if v and v.importe_calculado is not none %}class="valued"{% endif %}>
                                 </td>
                                 <td>
                                     <input type="number" step="any"
                                            data-field="descuento"
                                            value="{{ line.descuento if line.descuento is not none else '' }}">
                                 </td>
-                                <td>
-                                    <input type="number" step="any"
-                                           data-field="precio_neto"
-                                           value="{{ eff_importe if eff_importe is not none else '' }}"
-                                           {% if v and v.importe_calculado is not none %}class="valued"{% endif %}>
-                                </td>
+                                {#
+                                    'Precio' (extraído del PDF del albarán) ya no se pinta
+                                    como columna porque el revisor trabaja con Precio unitario
+                                    (contrato) + Importe. Mantenemos el valor en un input
+                                    hidden para que al guardar no se pierda el dato original
+                                    extraído; así sigue disponible en BBDD si luego lo
+                                    necesitamos.
+                                #}
+                                <input type="hidden"
+                                       data-field="precio"
+                                       value="{{ line.precio if line.precio is not none else '' }}">
                                 <td>
                                     <input type="text"
                                            data-field="codigo"
@@ -478,9 +485,8 @@
                         <th>Cantidad</th>
                         <th>Unidad</th>
                         <th>Precio unitario</th>
-                        <th>Precio</th>
-                        <th>Descuento</th>
                         <th>Importe</th>
+                        <th>Descuento</th>
                         <th>Código</th>
                         <th>Confianza</th>
                     </tr>
@@ -500,9 +506,8 @@
                             <td>{{ eff_cantidad if eff_cantidad is not none else '—' }}</td>
                             <td>{{ eff_unidad or '—' }}</td>
                             <td>{{ eff_precio_unit if eff_precio_unit is not none else '—' }}</td>
-                            <td>{{ line.precio if line.precio is not none else '—' }}</td>
-                            <td>{{ line.descuento if line.descuento is not none else '—' }}</td>
                             <td>{{ eff_importe if eff_importe is not none else '—' }}</td>
+                            <td>{{ line.descuento if line.descuento is not none else '—' }}</td>
                             <td>{{ line.codigo or '—' }}</td>
                             <td>
                                 {% if line.confianza_pct is not none %}
@@ -511,7 +516,7 @@
                             </td>
                         </tr>
                     {% else %}
-                        <tr><td colspan="11" class="empty-cell">Sin líneas para este proveedor.</td></tr>
+                        <tr><td colspan="10" class="empty-cell">Sin líneas para este proveedor.</td></tr>
                     {% endfor %}
                     </tbody>
                 </table>

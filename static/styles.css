@@ -398,3 +398,62 @@ textarea { resize: vertical; }
     .contrato-empty-actions .btn { width: 100%; }
     .contrato-empty-hint { margin-left: 0; text-align: center; }
 }
+
+/* =========================================================== */
+/*  TABLA DE LÍNEAS — columnas numéricas bien dimensionadas     */
+/*  Añade al final de styles.css                                */
+/* =========================================================== */
+
+/*
+ * Reglas por columna.
+ *
+ * Usamos selector :nth-child() sobre la fila para dimensionar cada
+ * input según su columna. La cabecera tiene 11 columnas en la vista
+ * editable:
+ *   1 #         | 2 Código imput.  | 3 Concepto
+ *   4 Cantidad  | 5 Unidad         | 6 Precio unit.
+ *   7 Precio    | 8 Descuento      | 9 Importe
+ *  10 Código    | 11 (acción)
+ *
+ * En la vista readonly hay 11 también (última columna = Confianza).
+ */
+
+/* Alineación derecha + fuente tabular en los inputs numéricos.
+ * tabular-nums hace que cada dígito ocupe el mismo ancho: los
+ * números "se alinean" visualmente columna a columna. Es el
+ * estándar de cualquier tabla de contabilidad moderna. */
+#lines-table td input[type="number"] {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+    min-width: 90px;
+}
+
+/* Cantidad: hasta 5 dígitos (99.999) */
+#lines-table td:nth-child(4) input { min-width: 80px; }
+
+/* Unidad: texto corto, 'UD', 'kg', 'm2', etc. */
+#lines-table td:nth-child(5) input { min-width: 60px; max-width: 80px; }
+
+/* Precio unitario: precios de catálogo, 4–6 dígitos con decimales */
+#lines-table td:nth-child(6) input { min-width: 100px; }
+
+/* Precio (del albarán): igual */
+#lines-table td:nth-child(7) input { min-width: 100px; }
+
+/* Descuento: valores pequeños */
+#lines-table td:nth-child(8) input { min-width: 80px; }
+
+/* Importe: puede llegar a importes grandes (99.999,99).
+ * Es la columna que te reventaba. Le damos espacio de sobra. */
+#lines-table td:nth-child(9) input {
+    min-width: 120px;
+}
+
+/* Alineación derecha también en los <td> de la vista readonly,
+ * donde no hay inputs sino texto plano. */
+.table td.num-cell,
+.table th.num-cell {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}

@@ -120,6 +120,12 @@
     // crean readonly y vacíos: nunca habrá valoración para filas que
     // acaba de añadir el usuario hasta que el servicio 6 vuelva a
     // pasar (fuera del alcance de esta pasada).
+    //
+    // Orden de columnas:
+    //   # | Cód imput. | Concepto | Cantidad | Unidad |
+    //     Precio unit. | Importe | Descuento | Código | [Acciones]
+    // Más un input HIDDEN para 'precio' (extraído del albarán) que
+    // viaja en el payload al guardar pero no ocupa celda visual.
     // --------------------------------------------------------------- //
     function buildEmptyRow(index) {
         const tr = document.createElement("tr");
@@ -167,10 +173,16 @@
         cell(num("cantidad"));
         cell(ro("unidad_display"));
         cell(ro("precio_unitario_display"));
-        cell(num("precio"));
+        cell(num("precio_neto"));     // Importe (columna nueva en el hueco de 'Precio')
         cell(num("descuento"));
-        cell(num("precio_neto"));
         cell(txt("codigo"));
+
+        // 'precio' (del albarán) sobrevive oculto, como input hidden
+        // pegado a la primera celda para que siga en el form.
+        const hiddenPrecio = document.createElement("input");
+        hiddenPrecio.type = "hidden";
+        hiddenPrecio.dataset.field = "precio";
+        tr.firstChild.appendChild(hiddenPrecio);
 
         const actionsTd = document.createElement("td");
         const btn = document.createElement("button");
