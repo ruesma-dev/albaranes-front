@@ -120,6 +120,28 @@ class ContratoPayload(BaseModel):
     pdf_sharepoint_web_url: str | None = None
 
 
+# ====================================================================== #
+# Sub-tanda 2D — ValuationLineUpdate
+#
+# Payload con los campos editables de una línea sintética cuando el
+# revisor la toca en la tabla del formulario. Identifica la fila por
+# su valuation_line_id (PK de albaran_line_valuations). El servicio 4
+# hace UPDATE limitado a estos campos.
+#
+# Se coloca antes de MergeDocumentUpdatePayload para que éste pueda
+# referenciarlo directamente sin forward-reference.
+# ====================================================================== #
+
+class ValuationLineUpdate(BaseModel):
+    valuation_line_id: int
+    codigo_partida_final: str | None = None
+    descripcion_linea: str | None = None
+    cantidad_albaran: float | None = None
+    unidad_contrato: str | None = None
+    precio_unitario_final: float | None = None
+    importe_calculado: float | None = None
+
+
 class MergeDocumentUpdatePayload(BaseModel):
     proveedor_nombre: str | None = None
     proveedor_cif: str | None = None
@@ -134,6 +156,12 @@ class MergeDocumentUpdatePayload(BaseModel):
     approved: bool = False
     approved_by: str | None = None
     lines: list[MergeLinePayload] = Field(default_factory=list)
+    # Sub-tanda 2D — ediciones del revisor sobre filas sintéticas.
+    # Se aplican a ``albaran_line_valuations`` por valuation_line_id.
+    # Si la lista llega vacía o ausente, no se toca ninguna sintética.
+    valuation_line_updates: list[ValuationLineUpdate] = Field(
+        default_factory=list,
+    )
 
 
 # ====================================================================== #
@@ -148,7 +176,20 @@ class MergeDocumentUpdatePayload(BaseModel):
 class LineValuationPayload(BaseModel):
     """Una fila de ``albaran_line_valuations`` (servicio 6)."""
 
-    merge_line_id: int
+    # ---- sub-tanda 2D ----
+    # id de la fila en albaran_line_valuations. Necesario para que el
+    # revisor pueda editar las sintéticas (UPDATE por id).
+    # Opcional para compatibilidad con payloads ya construidos
+    # (se fue añadiendo progresivamente).
+    valuation_line_id: int | None = None
+
+    # merge_line_id:
+    #   - int: línea 'from_albaran' (viene del albarán, línea del merge).
+    #   - None: línea 'synthetic_modifier' (generada por el valorador
+    #     para representar un modificador implícito: incremento por
+    #     año, consistencia, árido, aditivo, residuos, tiempo).
+    merge_line_id: int | None = None
+
     matched_contrato_line_id: int | None = None
     derived_contrato_line_id: int | None = None
 
@@ -179,6 +220,14 @@ class LineValuationPayload(BaseModel):
     match_method: str | None = None
     review_required: bool | None = None
 
+    # ---- sub-tanda 2D: identificación de línea sintética ----
+    # Opcionales por compatibilidad con valoraciones anteriores a 2D.
+    line_kind: str = "from_albaran"
+    parent_merge_line_id: int | None = None
+    modifier_source: str | None = None
+    modifier_reason: str | None = None
+    descripcion_linea: str | None = None
+
 
 class ValuationPayload(BaseModel):
     """Cabecera + mapa ``merge_line_id -> LineValuationPayload``."""
@@ -200,6 +249,52 @@ class ValuationPayload(BaseModel):
     lines_by_merge_line_id: dict[int, LineValuationPayload] = Field(
         default_factory=dict,
     )
+    # ---- sub-tanda 2D ----
+    # Líneas sintéticas (line_kind='synthetic_modifier'). No están en
+    # lines_by_merge_line_id porque no tienen merge_line_id. El template
+    # las itera aparte o las mezcla en display_lines.
+    synthetic_lines: list[LineValuationPayload] = Field(default_factory=list)
+
+
+# ====================================================================== #
+# Sub-tanda 2D — DisplayLine
+#
+# DTO uniforme para la tabla de líneas del detalle. Mezcla las líneas
+# del merge (from_albaran) con las sintéticas de valoración, en el
+# orden correcto para la UI (cada sintética justo después de su base).
+#
+# El template itera display_lines y trata todas las filas por igual.
+# El campo ``line_kind`` y los ids internos (``merge_line_id`` para
+# from_albaran, ``valuation_line_id`` para sintéticas) permiten al JS
+# del front saber a qué endpoint enviar las ediciones al guardar.
+# ====================================================================== #
+
+class DisplayLine(BaseModel):
+    """Una fila visible en la tabla de líneas del detalle."""
+
+    # Identificación
+    line_kind: str  # 'from_albaran' | 'synthetic_modifier'
+    merge_line_id: int | None = None       # solo si from_albaran
+    valuation_line_id: int | None = None   # solo si synthetic_modifier
+    line_index: int | None = None          # orden visual (para base y
+                                            # para la sintética se usa
+                                            # el line_index de la base +
+                                            # orden de modificador)
+
+    # Datos a mostrar / editar
+    codigo_imputacion: str | None = None
+    concepto: str | None = None
+    cantidad: float | None = None
+    unidad: str | None = None
+    precio_unitario: float | None = None
+    importe: float | None = None
+    descuento: float | None = None
+    codigo: str | None = None
+    confianza_pct: float | None = None
+
+    # Sub-campos que el template solo usa en modo traza (no de entrada).
+    is_valued: bool = False                # True si hay valoración ligada
+    parent_merge_line_id: int | None = None  # sintéticas: a qué base cuelgan
 
 
 class DocumentDetailPayload(BaseModel):
@@ -235,6 +330,11 @@ class DocumentDetailPayload(BaseModel):
     review_notes: str | None = None
     created_at_utc: str
     lines: list[MergeLinePayload] = Field(default_factory=list)
+    # Sub-tanda 2D — lista unificada para la UI: mezcla líneas del
+    # merge (from_albaran) con las sintéticas de valoración en orden.
+    # El template la usa en lugar de ``lines`` para pintar la tabla
+    # en el detalle. ``lines`` se mantiene por compatibilidad (API).
+    display_lines: list[DisplayLine] = Field(default_factory=list)
     provider_snapshots: list[ProviderSnapshot] = Field(default_factory=list)
     contratos: list[ContratoPayload] = Field(default_factory=list)
     selected_contrato_codigo: str | None = None

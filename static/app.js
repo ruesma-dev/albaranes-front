@@ -130,6 +130,10 @@
     function buildEmptyRow(index) {
         const tr = document.createElement("tr");
         tr.dataset.lineId = "";
+        // Sub-tanda 2D: filas nuevas son siempre del albarán-merge.
+        // Las sintéticas solo las crea el valorador.
+        tr.dataset.lineKind = "from_albaran";
+        tr.dataset.valuationLineId = "";
 
         function cell(inner) {
             const td = document.createElement("td");
@@ -173,7 +177,9 @@
         cell(num("cantidad"));
         cell(ro("unidad_display"));
         cell(ro("precio_unitario_display"));
-        cell(num("precio_neto"));     // Importe (columna nueva en el hueco de 'Precio')
+        // Importe (el template V3 usa data-field=importe; al enviar al
+        // backend collectLinesAndValuationUpdates lo mapea a precio_neto).
+        cell(num("importe"));
         cell(num("descuento"));
         cell(txt("codigo"));
 
@@ -232,31 +238,89 @@
 
     // --------------------------------------------------------------- //
     // Recolectar líneas para enviar al backend.
-    // Los campos 'unidad_display' y 'precio_unitario_display' se
-    // ignoran: son puramente informativos (vienen de la valoración).
+    //
+    // Sub-tanda 2D: diferenciamos dos tipos de fila por data-line-kind:
+    //
+    //   - "from_albaran": líneas reales del albarán-merge. Se envían en
+    //     payload.lines tal como antes. data-line-id lleva el id en
+    //     albaran_lines_merge.
+    //
+    //   - "synthetic_modifier": líneas sintéticas de valoración
+    //     (incrementos por año, consistencia, árido, aditivo, residuos,
+    //     tiempo). No viven en el merge sino en albaran_line_valuations.
+    //     Se envían en payload.valuation_line_updates identificadas por
+    //     data-valuation-line-id.
+    //
+    // Si una fila no tiene data-line-kind (caso raro: código antiguo)
+    // la tratamos como from_albaran por compatibilidad.
+    //
+    // Los campos 'unidad_display' y 'precio_unitario_display' siguen
+    // siendo puramente informativos y no se envían.
+    //
+    // Nota sobre nombres: el backend ``MergeLinePayload`` usa
+    // 'precio_neto' como nombre de campo para el importe de la línea
+    // (herencia del modelo extraído). El template V3 usa data-field=
+    // "importe" como nombre más claro para el revisor; al recolectar
+    // lo mapeamos: importe → precio_neto.
     // --------------------------------------------------------------- //
-    function collectLines() {
-        const out = [];
+    function collectLinesAndValuationUpdates() {
+        const merge_lines = [];
+        const valuation_updates = [];
         const rows = linesBody.querySelectorAll("tr");
-        rows.forEach(function (row, idx) {
+        let merge_index = 0;
+
+        rows.forEach(function (row) {
             const byField = {};
             row.querySelectorAll("[data-field]").forEach(function (el) {
                 byField[el.dataset.field] = el;
             });
-            out.push({
+
+            const kind = row.dataset.lineKind || "from_albaran";
+
+            if (kind === "synthetic_modifier") {
+                const vlid = row.dataset.valuationLineId;
+                if (!vlid) {
+                    // Sin valuation_line_id no podemos UPDATE-arla;
+                    // silencioso: no se envía.
+                    return;
+                }
+                valuation_updates.push({
+                    valuation_line_id: Number(vlid),
+                    codigo_partida_final: readTextOrNull(byField.codigo_imputacion),
+                    descripcion_linea: readTextOrNull(byField.concepto),
+                    cantidad_albaran: readNumericOrNull(byField.cantidad),
+                    unidad_contrato: readTextOrNull(byField.unidad),
+                    precio_unitario_final: readNumericOrNull(byField.precio_unitario),
+                    importe_calculado: readNumericOrNull(byField.importe),
+                });
+                return;
+            }
+
+            // from_albaran (o fila nueva añadida por el usuario).
+            merge_index += 1;
+            merge_lines.push({
                 id: row.dataset.lineId ? Number(row.dataset.lineId) : null,
-                line_index: idx + 1,
+                line_index: merge_index,
                 codigo_imputacion: readTextOrNull(byField.codigo_imputacion),
                 concepto: readTextOrNull(byField.concepto),
                 cantidad: readNumericOrNull(byField.cantidad),
                 precio: readNumericOrNull(byField.precio),
                 descuento: readNumericOrNull(byField.descuento),
-                precio_neto: readNumericOrNull(byField.precio_neto),
+                // 'importe' en V3 == 'precio_neto' en el schema del backend.
+                precio_neto: readNumericOrNull(byField.importe),
                 codigo: readTextOrNull(byField.codigo),
                 // 'unidad_display' y 'precio_unitario_display' NO se envían.
             });
         });
-        return out;
+
+        return { merge_lines: merge_lines, valuation_updates: valuation_updates };
+    }
+
+    // Compatibilidad hacia atrás: algún código externo podría llamar
+    // collectLines(). Exponemos una versión reducida que devuelve solo
+    // las líneas del merge.
+    function collectLines() {
+        return collectLinesAndValuationUpdates().merge_lines;
     }
 
     function collectSelectedContratoCodigo() {
@@ -273,6 +337,9 @@
             const value = (el.value || "").trim();
             return value || null;
         };
+        // Sub-tanda 2D: una sola lectura del DOM para obtener tanto
+        // las líneas del merge como las ediciones de sintéticas.
+        const collected = collectLinesAndValuationUpdates();
         return {
             proveedor_nombre: getInput("proveedor_nombre"),
             proveedor_cif: getInput("proveedor_cif"),
@@ -286,7 +353,8 @@
             approved_by: getInput("approved_by"),
             approved: Boolean(markApproved),
             selected_contrato_codigo: collectSelectedContratoCodigo(),
-            lines: collectLines(),
+            lines: collected.merge_lines,
+            valuation_line_updates: collected.valuation_updates,
         };
     }
 

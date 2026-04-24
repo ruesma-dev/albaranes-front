@@ -376,78 +376,110 @@
                         </tr>
                         </thead>
                         <tbody>
-                        {% for line in document.lines %}
-                            {% set v = val_lines.get(line.id) if line.id is not none else none %}
-                            {# Valores efectivos a mostrar: priorizar valoración cuando exista. #}
-                            {% set eff_codimp = (v.codigo_partida_final if v and v.codigo_partida_final) or line.codigo_imputacion %}
-                            {% set eff_cantidad = (v.cantidad_convertida if v and v.cantidad_convertida is not none else line.cantidad) %}
-                            {% set eff_unidad = (v.unidad_contrato if v and v.unidad_contrato) or (v.unidad_albaran if v else '') %}
-                            {% set eff_precio_unit = (v.precio_unitario_final if v else none) %}
-                            {% set eff_importe = (v.importe_calculado if v and v.importe_calculado is not none else line.precio_neto) %}
-                            <tr data-line-id="{{ line.id if line.id is not none else '' }}">
+                        {# Sub-tanda 2D: iteramos display_lines en vez de
+                           document.lines. Cada fila puede ser:
+                           - from_albaran: línea del merge (editable,
+                             guarda en albaran_lines_merge).
+                           - synthetic_modifier: línea sintética de
+                             valoración (editable, guarda en
+                             albaran_line_valuations por valuation_line_id).
+                           El JS las distingue por data-line-kind. #}
+                        {% for dline in document.display_lines %}
+                            <tr data-line-kind="{{ dline.line_kind }}"
+                                data-line-id="{{ dline.merge_line_id if dline.merge_line_id is not none else '' }}"
+                                data-valuation-line-id="{{ dline.valuation_line_id if dline.valuation_line_id is not none else '' }}">
                                 <td>{{ loop.index }}</td>
                                 <td>
                                     <input type="text"
                                            data-field="codigo_imputacion"
-                                           value="{{ eff_codimp or '' }}"
-                                           {% if v and v.codigo_partida_final %}class="valued"{% endif %}>
+                                           value="{{ dline.codigo_imputacion or '' }}"
+                                           {% if dline.is_valued %}class="valued"{% endif %}>
                                 </td>
                                 <td>
-                                    <textarea data-field="concepto">{{ line.concepto or '' }}</textarea>
+                                    <textarea data-field="concepto">{{ dline.concepto or '' }}</textarea>
                                 </td>
                                 <td>
                                     <input type="number" step="any"
                                            data-field="cantidad"
-                                           value="{{ eff_cantidad if eff_cantidad is not none else '' }}"
-                                           {% if v and v.cantidad_convertida is not none %}class="valued"{% endif %}>
+                                           value="{{ dline.cantidad if dline.cantidad is not none else '' }}"
+                                           {% if dline.is_valued %}class="valued"{% endif %}>
                                 </td>
                                 <td>
-                                    {# Unidad NO se guarda en el albarán-merge; readonly. #}
-                                    <input type="text"
-                                           data-field="unidad_display"
-                                           value="{{ eff_unidad or '' }}"
-                                           readonly
-                                           class="readonly-cell{% if v and v.unidad_contrato %} valued{% endif %}">
+                                    {# Unidad: editable para sintéticas (se guarda en
+                                       albaran_line_valuations.unidad_contrato); para
+                                       from_albaran es readonly (no se persiste en
+                                       albaran_lines_merge, se muestra la valorada). #}
+                                    {% if dline.line_kind == 'synthetic_modifier' %}
+                                        <input type="text"
+                                               data-field="unidad"
+                                               value="{{ dline.unidad or '' }}"
+                                               {% if dline.is_valued %}class="valued"{% endif %}>
+                                    {% else %}
+                                        <input type="text"
+                                               data-field="unidad_display"
+                                               value="{{ dline.unidad or '' }}"
+                                               readonly
+                                               class="readonly-cell{% if dline.is_valued %} valued{% endif %}">
+                                    {% endif %}
                                 </td>
                                 <td>
-                                    {# Precio unitario (del contrato) NO se guarda; readonly. #}
+                                    {# Precio unitario: editable para sintéticas; para
+                                       from_albaran readonly (viene del contrato). #}
+                                    {% if dline.line_kind == 'synthetic_modifier' %}
+                                        <input type="number" step="any"
+                                               data-field="precio_unitario"
+                                               value="{{ dline.precio_unitario if dline.precio_unitario is not none else '' }}"
+                                               {% if dline.is_valued %}class="valued"{% endif %}>
+                                    {% else %}
+                                        <input type="number" step="any"
+                                               data-field="precio_unitario_display"
+                                               value="{{ dline.precio_unitario if dline.precio_unitario is not none else '' }}"
+                                               readonly
+                                               class="readonly-cell{% if dline.precio_unitario is not none %} valued{% endif %}">
+                                    {% endif %}
+                                </td>
+                                <td>
+                                    {# Importe. Para from_albaran persiste en
+                                       albaran_lines_merge.precio_neto; para sintéticas
+                                       persiste en albaran_line_valuations.importe_calculado. #}
                                     <input type="number" step="any"
-                                           data-field="precio_unitario_display"
-                                           value="{{ eff_precio_unit if eff_precio_unit is not none else '' }}"
-                                           readonly
-                                           class="readonly-cell{% if eff_precio_unit is not none %} valued{% endif %}">
-                                </td>
-                                <td>
-                                    {# Importe (antes precio_neto). Muestra el valorado si existe,
-                                       se edita y se persiste en albaran_lines_merge.precio_neto. #}
-                                    <input type="number" step="any"
-                                           data-field="precio_neto"
-                                           value="{{ eff_importe if eff_importe is not none else '' }}"
-                                           {% if v and v.importe_calculado is not none %}class="valued"{% endif %}>
+                                           data-field="importe"
+                                           value="{{ dline.importe if dline.importe is not none else '' }}"
+                                           {% if dline.is_valued %}class="valued"{% endif %}>
                                 </td>
                                 <td>
                                     <input type="number" step="any"
                                            data-field="descuento"
-                                           value="{{ line.descuento if line.descuento is not none else '' }}">
+                                           value="{{ dline.descuento if dline.descuento is not none else '' }}"
+                                           {% if dline.line_kind == 'synthetic_modifier' %}readonly class="readonly-cell"{% endif %}>
                                 </td>
-                                {#
-                                    'Precio' (extraído del PDF del albarán) ya no se pinta
-                                    como columna porque el revisor trabaja con Precio unitario
-                                    (contrato) + Importe. Mantenemos el valor en un input
-                                    hidden para que al guardar no se pierda el dato original
-                                    extraído; así sigue disponible en BBDD si luego lo
-                                    necesitamos.
-                                #}
-                                <input type="hidden"
-                                       data-field="precio"
-                                       value="{{ line.precio if line.precio is not none else '' }}">
                                 <td>
                                     <input type="text"
                                            data-field="codigo"
-                                           value="{{ line.codigo or '' }}">
+                                           value="{{ dline.codigo or '' }}"
+                                           {% if dline.line_kind == 'synthetic_modifier' %}readonly class="readonly-cell"{% endif %}>
                                 </td>
                                 <td>
-                                    <button type="button" class="btn danger small js-remove-line">Eliminar</button>
+                                    {# Eliminar solo aplica a from_albaran: las
+                                       sintéticas solo desaparecen al re-valorar. #}
+                                    {% if dline.line_kind == 'from_albaran' %}
+                                        {# Hidden 'precio' para preservar el precio
+                                           original extraído del albarán (no se pinta
+                                           como columna pero viaja al guardar para
+                                           no perder el dato en BBDD). Solo aplica
+                                           a from_albaran; las sintéticas no tienen
+                                           precio original del albarán. #}
+                                        {% set merge_line_payload = none %}
+                                        {% for ml in document.lines %}
+                                            {% if ml.id == dline.merge_line_id %}
+                                                {% set merge_line_payload = ml %}
+                                            {% endif %}
+                                        {% endfor %}
+                                        <input type="hidden"
+                                               data-field="precio"
+                                               value="{{ merge_line_payload.precio if merge_line_payload and merge_line_payload.precio is not none else '' }}">
+                                        <button type="button" class="btn danger small js-remove-line">Eliminar</button>
+                                    {% endif %}
                                 </td>
                             </tr>
                         {% endfor %}

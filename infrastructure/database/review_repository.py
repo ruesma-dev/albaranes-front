@@ -11,6 +11,7 @@ from sqlalchemy import delete, func, inspect, nullslast, or_, select, text
 from domain.models.contrato_sigrid_models import ContratoFromSigrid
 from domain.models.review_models import (
     ContratoPayload,
+    DisplayLine,
     DocumentDetailPayload,
     DocumentListFilters,
     DocumentListItem,
@@ -20,6 +21,7 @@ from domain.models.review_models import (
     MergeLinePayload,
     PaginatedDocuments,
     ProviderSnapshot,
+    ValuationLineUpdate,
     ValuationPayload,
     VIEW_MODE_MERGE,
     normalize_view_mode,
@@ -406,7 +408,8 @@ class AlbaranReviewRepository:
         try:
             line_rows = session.execute(
                 text(
-                    "SELECT merge_line_id, matched_contrato_line_id, "
+                    "SELECT id, "
+                    "       merge_line_id, matched_contrato_line_id, "
                     "       derived_contrato_line_id, "
                     "       precio_unitario_contrato_db, "
                     "       precio_unitario_pdf_inferido, "
@@ -421,9 +424,20 @@ class AlbaranReviewRepository:
                     "       codigo_partida_albaran, codigo_partida_final, "
                     "       partida_action, "
                     "       match_confidence_pct, match_method, "
-                    "       review_required "
+                    "       review_required, "
+                    # ----- sub-tanda 2D: campos de líneas sintéticas -----
+                    "       line_kind, parent_merge_line_id, "
+                    "       modifier_source, modifier_reason, "
+                    "       descripcion_linea "
                     "FROM albaran_line_valuations "
-                    "WHERE valuation_id = :vid"
+                    "WHERE valuation_id = :vid "
+                    # from_albaran primero (para poder iterar base, luego
+                    # sintéticas agrupadas por parent en la UI futura).
+                    "ORDER BY "
+                    "  CASE WHEN line_kind = 'synthetic_modifier' "
+                    "       THEN 1 ELSE 0 END, "
+                    "  merge_line_id NULLS LAST, "
+                    "  id"
                 ),
                 {"vid": valuation_id},
             ).mappings().all()
@@ -431,11 +445,66 @@ class AlbaranReviewRepository:
             session.rollback()
             line_rows = []
 
+        # Sub-tanda 2D: las líneas pueden ser 'from_albaran' (con
+        # merge_line_id real, van al dict de siempre para que la UI
+        # pinte cada línea del albarán con su valoración) o
+        # 'synthetic_modifier' (merge_line_id NULL, se acumulan en una
+        # lista aparte para que la UI las pinte como bloque adicional).
+        #
+        # Compatibilidad retroactiva: para valoraciones anteriores a
+        # 2D (sin columna line_kind), tratamos NULL/'' como
+        # 'from_albaran'. Así los albaranes valorados con la versión
+        # anterior siguen funcionando.
         lines_by_id: dict[int, LineValuationPayload] = {}
+        synthetic_lines: list[LineValuationPayload] = []
         for row in line_rows:
-            merge_line_id = int(row["merge_line_id"])
-            lines_by_id[merge_line_id] = LineValuationPayload(
-                merge_line_id=merge_line_id,
+            raw_merge_line_id = row.get("merge_line_id") if hasattr(
+                row, "get"
+            ) else row["merge_line_id"]
+
+            raw_line_kind = None
+            try:
+                raw_line_kind = row["line_kind"]
+            except KeyError:
+                # Columna no existe (BBDD anterior a 2D) — default.
+                raw_line_kind = None
+            line_kind = (raw_line_kind or "from_albaran").strip() or "from_albaran"
+
+            # Columnas nuevas de 2D — opcionales, toleramos ausencia.
+            try:
+                parent_merge_line_id = row["parent_merge_line_id"]
+            except KeyError:
+                parent_merge_line_id = None
+            try:
+                modifier_source = row["modifier_source"]
+            except KeyError:
+                modifier_source = None
+            try:
+                modifier_reason = row["modifier_reason"]
+            except KeyError:
+                modifier_reason = None
+            try:
+                descripcion_linea = row["descripcion_linea"]
+            except KeyError:
+                descripcion_linea = None
+
+            merge_line_id_typed: int | None
+            if raw_merge_line_id is None:
+                merge_line_id_typed = None
+            else:
+                try:
+                    merge_line_id_typed = int(raw_merge_line_id)
+                except (TypeError, ValueError):
+                    merge_line_id_typed = None
+
+            try:
+                valuation_line_id = int(row["id"])
+            except (TypeError, ValueError, KeyError):
+                valuation_line_id = None
+
+            payload = LineValuationPayload(
+                valuation_line_id=valuation_line_id,
+                merge_line_id=merge_line_id_typed,
                 matched_contrato_line_id=row["matched_contrato_line_id"],
                 derived_contrato_line_id=row["derived_contrato_line_id"],
                 precio_unitario_contrato_db=row["precio_unitario_contrato_db"],
@@ -459,7 +528,25 @@ class AlbaranReviewRepository:
                 match_confidence_pct=row["match_confidence_pct"],
                 match_method=row["match_method"],
                 review_required=row["review_required"],
+                # --- sub-tanda 2D ---
+                line_kind=line_kind,
+                parent_merge_line_id=parent_merge_line_id,
+                modifier_source=modifier_source,
+                modifier_reason=modifier_reason,
+                descripcion_linea=descripcion_linea,
             )
+
+            if line_kind == "synthetic_modifier":
+                synthetic_lines.append(payload)
+            else:
+                # from_albaran. Si por la razón que sea merge_line_id es
+                # None (BBDD corrupta, dato antiguo raro), no lo metemos
+                # en el dict — se añade también a synthetic_lines para
+                # que al menos no desaparezca.
+                if merge_line_id_typed is None:
+                    synthetic_lines.append(payload)
+                else:
+                    lines_by_id[merge_line_id_typed] = payload
 
         return ValuationPayload(
             valuation_id=valuation_id,
@@ -479,6 +566,7 @@ class AlbaranReviewRepository:
             created_at_utc=header_row["created_at_utc"],
             updated_at_utc=header_row["updated_at_utc"],
             lines_by_merge_line_id=lines_by_id,
+            synthetic_lines=synthetic_lines,
         )
 
     def _build_merge_detail(
@@ -491,6 +579,13 @@ class AlbaranReviewRepository:
         selected_contrato_codigo: str | None,
         valuation: ValuationPayload | None = None,
     ) -> DocumentDetailPayload:
+        merge_lines_payload = [
+            self._merge_line_to_payload(line) for line in merge_doc.lines
+        ]
+        display_lines = self._build_display_lines(
+            merge_lines=merge_lines_payload,
+            valuation=valuation,
+        )
         return DocumentDetailPayload(
             id=merge_doc.id,
             view_mode=VIEW_MODE_MERGE,
@@ -523,7 +618,8 @@ class AlbaranReviewRepository:
             reviewed_at_utc=merge_doc.reviewed_at_utc,
             review_notes=merge_doc.review_notes,
             created_at_utc=merge_doc.created_at_utc,
-            lines=[self._merge_line_to_payload(line) for line in merge_doc.lines],
+            lines=merge_lines_payload,
+            display_lines=display_lines,
             provider_snapshots=provider_snapshots,
             contratos=contratos,
             selected_contrato_codigo=selected_contrato_codigo,
@@ -846,6 +942,33 @@ class AlbaranReviewRepository:
             session.flush()
 
             # -------------------------------------------------------- #
+            # Sub-tanda 2D — ediciones del revisor sobre líneas
+            # sintéticas (line_kind='synthetic_modifier').
+            #
+            # Estas líneas NO viven en albaran_lines_merge; viven en
+            # albaran_line_valuations con merge_line_id=NULL. El
+            # revisor las ve en la tabla del detalle como una fila
+            # más y puede editar sus campos visibles: concepto,
+            # cantidad, unidad, precio unitario, importe, partida.
+            # Aquí aplicamos esas ediciones por valuation_line_id.
+            #
+            # No afecta a las from_albaran (tienen merge_line_id real
+            # y ya se han procesado arriba). Tampoco se crean ni se
+            # borran sintéticas desde la UI — eso lo hace el svc6 al
+            # re-valorar. Si el usuario borró visualmente una fila
+            # sintética, simplemente no llega en el payload y queda
+            # sin modificar; si quiere quitarla de la valoración,
+            # tiene que re-valorar.
+            # -------------------------------------------------------- #
+            if payload.valuation_line_updates:
+                self._apply_valuation_line_updates_in_session(
+                    session=session,
+                    document_id=document.id,
+                    updates=payload.valuation_line_updates,
+                )
+                session.flush()
+
+            # -------------------------------------------------------- #
             # Recalcular importe_calculado en las líneas valoradas que
             # sobreviven. Fórmula: precio_unitario_final * cantidad
             # efectiva, donde cantidad efectiva =
@@ -921,7 +1044,17 @@ class AlbaranReviewRepository:
             if pu is None:
                 continue
 
-            merge_line_id = int(row["merge_line_id"])
+            # Sub-tanda 2D: para las sintéticas merge_line_id es NULL.
+            # Esta función recalcula importes a partir de cantidades
+            # editadas por el revisor en líneas from_albaran; las
+            # sintéticas NO reciben cantidad del formulario por esa
+            # vía (su cantidad ya se actualizó, si el revisor la
+            # tocó, en _apply_valuation_line_updates_in_session).
+            # Aquí las dejamos con el importe_calculado que ya tenían.
+            raw_merge_line_id = row["merge_line_id"]
+            if raw_merge_line_id is None:
+                continue
+            merge_line_id = int(raw_merge_line_id)
 
             # Cantidad a usar: la nueva editada por el revisor (si
             # tenemos en el payload), si no la actual de la fila.
@@ -991,6 +1124,147 @@ class AlbaranReviewRepository:
             {"now": self._utc_iso(), "vid": valuation_id},
         )
 
+    # ------------------------------------------------------------------ #
+    # Sub-tanda 2D
+    #
+    # Aplica ediciones manuales del revisor sobre líneas sintéticas de
+    # valoración (line_kind='synthetic_modifier'). Estas filas viven
+    # en albaran_line_valuations con merge_line_id=NULL y se editan
+    # directamente en la tabla del detalle.
+    #
+    # Campos editables (ver ValuationLineUpdate en review_models):
+    #   - codigo_partida_final
+    #   - descripcion_linea
+    #   - cantidad_albaran (se replica en cantidad_convertida,
+    #     factor 1.0 porque no hay conversión de unidad para sintéticas)
+    #   - unidad_contrato (unidad visible en la fila)
+    #   - precio_unitario_final
+    #   - importe_calculado (recalculado si cantidad o precio cambian)
+    #
+    # Por seguridad:
+    #   - Filtramos por valuation_line_id en albaran_line_valuations
+    #     que pertenezca a un valuation del document_id dado
+    #     (evita que un payload manipule filas de otro documento).
+    #   - Solo actualizamos filas con line_kind='synthetic_modifier'.
+    #     Las from_albaran no pueden editarse por esta vía.
+    # ------------------------------------------------------------------ #
+    def _apply_valuation_line_updates_in_session(
+        self,
+        *,
+        session: Any,
+        document_id: str,
+        updates: list[Any],  # list[ValuationLineUpdate]; tipado suelto
+                             # para no importar el modelo en el header.
+    ) -> None:
+        if not updates:
+            return
+
+        # Recogemos los id solicitados para validarlos en una sola
+        # query y evitar que un payload toque filas ajenas.
+        requested_ids = [int(u.valuation_line_id) for u in updates]
+
+        try:
+            allowed_rows = session.execute(
+                text(
+                    "SELECT lv.id AS lv_id "
+                    "FROM albaran_line_valuations lv "
+                    "JOIN albaran_valuations v ON v.id = lv.valuation_id "
+                    "WHERE v.document_id = :doc_id "
+                    "  AND lv.line_kind = 'synthetic_modifier' "
+                    "  AND lv.id = ANY(:ids)"
+                ),
+                {"doc_id": document_id, "ids": requested_ids},
+            ).mappings().all()
+        except Exception:
+            # Si la columna line_kind aún no existiera (BBDD pre-2D),
+            # salimos silenciosamente. No tiene sentido aplicar updates
+            # a sintéticas si no existe el concepto.
+            session.rollback()
+            return
+
+        allowed_ids = {int(row["lv_id"]) for row in allowed_rows}
+        if not allowed_ids:
+            return
+
+        for upd in updates:
+            lv_id = int(upd.valuation_line_id)
+            if lv_id not in allowed_ids:
+                # Silencioso: la fila no pertenece a este documento,
+                # no es sintética o no existe. Puede pasar si el
+                # revisor recarga tras una re-valoración que eliminó
+                # la fila.
+                continue
+
+            # Derivamos el nuevo importe calculado: precio * cantidad.
+            # Si alguno falta, dejamos importe_calculado en null y que
+            # review_required se conserve como estaba.
+            nuevo_importe: float | None = None
+            if (
+                upd.precio_unitario_final is not None
+                and upd.cantidad_albaran is not None
+            ):
+                try:
+                    nuevo_importe = round(
+                        float(upd.precio_unitario_final)
+                        * float(upd.cantidad_albaran),
+                        2,
+                    )
+                except (TypeError, ValueError):
+                    nuevo_importe = None
+
+            # Si el revisor manda explícitamente un importe_calculado
+            # distinto del calculado, respetamos el del revisor (tiene
+            # autoridad). Esto cubre casos de precios por escalones o
+            # redondeos propios.
+            if upd.importe_calculado is not None:
+                try:
+                    nuevo_importe = round(float(upd.importe_calculado), 2)
+                except (TypeError, ValueError):
+                    pass
+
+            # Para sintéticas no hay conversión de unidad: cantidad
+            # convertida = cantidad albarán, factor = 1.0.
+            cantidad_val = (
+                float(upd.cantidad_albaran)
+                if upd.cantidad_albaran is not None
+                else None
+            )
+
+            session.execute(
+                text(
+                    "UPDATE albaran_line_valuations SET "
+                    "    codigo_partida_final = :codpart, "
+                    "    descripcion_linea = :desc, "
+                    "    cantidad_albaran = :ca, "
+                    "    cantidad_convertida = :cc, "
+                    "    factor_conversion = :fc, "
+                    "    unidad_contrato = :uc, "
+                    "    precio_unitario_final = :pu, "
+                    "    precio_unitario_source = "
+                    "        CASE WHEN :pu IS NOT NULL "
+                    "             THEN 'pdf_inference' "
+                    "             ELSE 'none' END, "
+                    "    importe_calculado = :imp, "
+                    "    importe_source = "
+                    "        CASE WHEN :imp IS NOT NULL "
+                    "             THEN 'calculated' "
+                    "             ELSE 'none' END "
+                    "WHERE id = :lv_id "
+                    "  AND line_kind = 'synthetic_modifier'"
+                ),
+                {
+                    "codpart": self._clean_text(upd.codigo_partida_final),
+                    "desc": self._clean_text(upd.descripcion_linea),
+                    "ca": cantidad_val,
+                    "cc": cantidad_val,
+                    "fc": 1.0 if cantidad_val is not None else None,
+                    "uc": self._clean_text(upd.unidad_contrato),
+                    "pu": upd.precio_unitario_final,
+                    "imp": nuevo_importe,
+                    "lv_id": lv_id,
+                },
+            )
+
     def set_approved(
         self,
         *,
@@ -1049,6 +1323,149 @@ class AlbaranReviewRepository:
             or document.sharepoint_web_url
             or document.document_storage_ref
             or document.sharepoint_relative_path
+        )
+
+    # ------------------------------------------------------------------ #
+    # Sub-tanda 2D — construcción de display_lines
+    #
+    # Mezcla líneas del merge (from_albaran) y líneas sintéticas de
+    # valoración en una sola lista ordenada:
+    #
+    #   [base_1, sint_a_de_base_1, sint_b_de_base_1,
+    #    base_2, sint_c_de_base_2,
+    #    base_3, ...]
+    #
+    # Criterio: por cada línea del merge (respetando su line_index),
+    # emitimos su DisplayLine y justo después las sintéticas cuyo
+    # parent_merge_line_id apunte a ella. Las sintéticas huérfanas
+    # (parent no encontrado) se emiten al final.
+    #
+    # Los campos se rellenan priorizando valoración sobre albarán:
+    #   - codigo_imputacion   ← codigo_partida_final ?? codigo_imputacion
+    #   - cantidad            ← cantidad_convertida ?? cantidad_albaran
+    #   - unidad              ← unidad_contrato    ?? unidad_albaran
+    #   - precio_unitario     ← precio_unitario_final
+    #   - importe             ← importe_calculado  ?? precio_neto
+    #
+    # Para sintéticas, todos los campos vienen del payload de
+    # valoración (no hay merge equivalente).
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def _build_display_lines(
+        *,
+        merge_lines: list[MergeLinePayload],
+        valuation: ValuationPayload | None,
+    ) -> list[DisplayLine]:
+        val_lines_by_merge = (
+            valuation.lines_by_merge_line_id if valuation else {}
+        )
+        synthetic_all = (
+            list(valuation.synthetic_lines) if valuation else []
+        )
+
+        # Agrupar sintéticas por parent_merge_line_id (int | None).
+        synth_by_parent: dict[int | None, list[LineValuationPayload]] = {}
+        for syn in synthetic_all:
+            key = syn.parent_merge_line_id
+            synth_by_parent.setdefault(key, []).append(syn)
+
+        display: list[DisplayLine] = []
+
+        for idx, line in enumerate(merge_lines, start=1):
+            v = val_lines_by_merge.get(line.id) if line.id is not None else None
+
+            eff_codimp = (
+                (v.codigo_partida_final if v and v.codigo_partida_final else None)
+                or line.codigo_imputacion
+            )
+            eff_cantidad = (
+                v.cantidad_convertida
+                if v and v.cantidad_convertida is not None
+                else line.cantidad
+            )
+            eff_unidad = (
+                (v.unidad_contrato if v and v.unidad_contrato else None)
+                or (v.unidad_albaran if v else None)
+            )
+            eff_precio_unit = v.precio_unitario_final if v else None
+            eff_importe = (
+                v.importe_calculado
+                if v and v.importe_calculado is not None
+                else line.precio_neto
+            )
+
+            display.append(
+                DisplayLine(
+                    line_kind="from_albaran",
+                    merge_line_id=line.id,
+                    valuation_line_id=(v.valuation_line_id if v else None),
+                    line_index=idx,
+                    codigo_imputacion=eff_codimp,
+                    concepto=line.concepto,
+                    cantidad=eff_cantidad,
+                    unidad=eff_unidad,
+                    precio_unitario=eff_precio_unit,
+                    importe=eff_importe,
+                    descuento=line.descuento,
+                    codigo=line.codigo,
+                    confianza_pct=line.confianza_pct,
+                    is_valued=v is not None,
+                    parent_merge_line_id=None,
+                )
+            )
+
+            # Sintéticas que cuelgan de esta base.
+            for syn in synth_by_parent.get(line.id, []):
+                display.append(
+                    AlbaranReviewRepository._synthetic_to_display(
+                        syn=syn,
+                        line_index=idx,
+                    )
+                )
+
+        # Sintéticas huérfanas (parent no encontrado). Raro, pero no
+        # podemos silenciarlas sin avisar: las colocamos al final.
+        orphans: list[LineValuationPayload] = []
+        known_parents = {line.id for line in merge_lines if line.id is not None}
+        for parent_key, syns in synth_by_parent.items():
+            if parent_key is None or parent_key not in known_parents:
+                orphans.extend(syns)
+        for orphan_idx, syn in enumerate(orphans, start=len(merge_lines) + 1):
+            display.append(
+                AlbaranReviewRepository._synthetic_to_display(
+                    syn=syn,
+                    line_index=orphan_idx,
+                )
+            )
+
+        return display
+
+    @staticmethod
+    def _synthetic_to_display(
+        *,
+        syn: LineValuationPayload,
+        line_index: int,
+    ) -> DisplayLine:
+        return DisplayLine(
+            line_kind="synthetic_modifier",
+            merge_line_id=None,
+            valuation_line_id=syn.valuation_line_id,
+            line_index=line_index,
+            codigo_imputacion=syn.codigo_partida_final,
+            concepto=syn.descripcion_linea,
+            cantidad=(
+                syn.cantidad_convertida
+                if syn.cantidad_convertida is not None
+                else syn.cantidad_albaran
+            ),
+            unidad=(syn.unidad_contrato or syn.unidad_albaran),
+            precio_unitario=syn.precio_unitario_final,
+            importe=syn.importe_calculado,
+            descuento=None,
+            codigo=None,
+            confianza_pct=None,
+            is_valued=True,
+            parent_merge_line_id=syn.parent_merge_line_id,
         )
 
     @staticmethod
