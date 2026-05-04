@@ -4,12 +4,20 @@ from __future__ import annotations
 import html
 import json
 import logging
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlencode
 
 import httpx
-from fastapi import FastAPI, Form, HTTPException, Query, Request
+from fastapi import (
+    BackgroundTasks,
+    FastAPI,
+    Form,
+    HTTPException,
+    Query,
+    Request,
+)
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -26,10 +34,14 @@ from domain.models.review_models import (
     VIEW_MODE_MERGE,
     normalize_view_mode,
 )
+from domain.ports.orchestrator_port import OrchestratorClient
 from infrastructure.database.review_repository import AlbaranReviewRepository
 from infrastructure.database.session_factory import SessionFactory
 from infrastructure.graph.token_provider import GraphTokenProvider
-from infrastructure.sigrid.sigrid_api_contrato_client import SigridApiContratoClient
+from infrastructure.http.orchestrator_client import HttpOrchestratorClient
+from infrastructure.sigrid.sigrid_api_contrato_client import (
+    SigridApiContratoClient,
+)
 from infrastructure.storage.sharepoint_contrato_pdf_storage import (
     SharePointContratoPdfStorage,
 )
@@ -37,6 +49,8 @@ from infrastructure.storage.sharepoint_contrato_pdf_storage import (
 logger = logging.getLogger(__name__)
 
 
+# Etiquetas legibles para mostrar en el desplegable de selector de vista.
+# Cualquier provider_origin no listado aquí se mostrará con su nombre en crudo.
 VIEW_LABELS = {
     VIEW_MODE_MERGE: "Consolidado (merge)",
     "openai": "OpenAI",
@@ -50,7 +64,9 @@ def _view_label(view_mode: str) -> str:
 
 
 # ------------------------------------------------------------------ #
-# Filtros Jinja2 para formatear en servidor.
+# Filtros Jinja2 para formatear en servidor (es-ES determinista).
+# Necesarios para que document_detail.html y documents_list.html
+# rendericen sin "TemplateAssertionError: No filter named ...".
 # ------------------------------------------------------------------ #
 def _format_fecha_int_iso(value: Any) -> str:
     """INT YYYYMMDD (20260115) -> 'YYYY-MM-DD' (2026-01-15). 0/None -> '—'."""
@@ -83,16 +99,15 @@ def _format_importe_eur(value: Any) -> str:
     return f"{formatted} €"
 
 
+# ------------------------------------------------------------------ #
+# Wiring del SharePointContratoPdfStorage (lo usa ContratoRefetchService).
+# Se construye con las MISMAS variables SHAREPOINT_* que usa el servicio 3.
+# Si faltan credenciales, devuelve None y el refetch service hará best-
+# effort sin subir PDFs.
+# ------------------------------------------------------------------ #
 def _build_contrato_pdf_storage(
     settings: Settings,
 ) -> SharePointContratoPdfStorage | None:
-    """Construye el storage de PDFs de contrato reutilizando las MISMAS
-    variables que el servicio 3 (``SHAREPOINT_*``).
-
-    Devuelve None si no hay ``graph_key`` o faltan settings clave para
-    el modo configurado. El ContratoRefetchService se construirá sin
-    pdf_storage y se saltará la descarga/subida de PDFs.
-    """
     graph_key = getattr(settings, "graph_key", None)
     if not graph_key:
         logger.warning(
@@ -134,7 +149,8 @@ def _build_contrato_pdf_storage(
             hostname=hostname,
             site_path=site_path,
             drive_name=str(
-                getattr(settings, "sharepoint_drive_name", "Documentos") or "Documentos"
+                getattr(settings, "sharepoint_drive_name", "Documentos")
+                or "Documentos"
             ),
             drive_id=drive_id,
             folder_root=str(
@@ -168,6 +184,20 @@ def build_app(settings: Settings) -> FastAPI:
     review_service = ReviewService(repository, settings.default_reviewer)
     tables_ready = review_service.initialize()
 
+    # ------------------------------------------------------------ #
+    # Cliente al orquestador (sv7).
+    # Best-effort: las llamadas se hacen en BackgroundTask y el cliente
+    # silencia errores HTTP / red. Si sv7 está caído, el save sigue
+    # funcionando — el revisor puede guardar y aprobar; la valoración
+    # se reanudará cuando sv7 vuelva (vía retrier o manual).
+    # ------------------------------------------------------------ #
+    orchestrator_client: OrchestratorClient = HttpOrchestratorClient(
+        base_url=settings.sv7_base_url,
+        path_contract_selected=settings.sv7_path_contract_selected,
+        path_document_approved=settings.sv7_path_document_approved,
+        timeout_s=settings.sv7_timeout_s,
+    )
+
     app = FastAPI(
         title=settings.app_title,
         version=settings.service_version,
@@ -180,16 +210,13 @@ def build_app(settings: Settings) -> FastAPI:
         if settings.preview_enabled and settings.graph_key
         else None
     )
+    app.state.orchestrator_client = orchestrator_client
 
-    # ------------------------------------------------------------------ #
+    # ------------------------------------------------------------ #
     # Wiring del servicio de re-fetch manual de contratos desde el portal.
     # Requiere las credenciales SIGRID_API_* en .env / Settings.
     # Si faltan, queda None y el endpoint devuelve 503.
-    #
-    # El SharePointContratoPdfStorage se intenta construir siempre que
-    # haya credenciales de Graph, INDEPENDIENTEMENTE de que haya Sigrid
-    # o no (aunque solo se usa cuando el refetch service está activo).
-    # ------------------------------------------------------------------ #
+    # ------------------------------------------------------------ #
     contrato_pdf_storage = _build_contrato_pdf_storage(settings)
 
     contrato_refetch_service: ContratoRefetchService | None = None
@@ -226,6 +253,9 @@ def build_app(settings: Settings) -> FastAPI:
     app.state.contrato_refetch_service = contrato_refetch_service
     app.state.contrato_pdf_storage = contrato_pdf_storage
 
+    # ------------------------------------------------------------ #
+    # Templates Jinja2 + filtros + globales.
+    # ------------------------------------------------------------ #
     templates = Jinja2Templates(
         directory=str(Path(__file__).resolve().parents[2] / "templates")
     )
@@ -257,8 +287,8 @@ def build_app(settings: Settings) -> FastAPI:
                 "default_page_size": settings.default_page_size,
                 "max_page_size": settings.max_page_size,
                 "preview_enabled": settings.preview_enabled,
+                "orchestrator_url": settings.sv7_base_url,
                 "contrato_refetch_wired": contrato_refetch_service is not None,
-                "contrato_pdf_storage_wired": contrato_pdf_storage is not None,
             },
         )
 
@@ -330,19 +360,34 @@ def build_app(settings: Settings) -> FastAPI:
     @app.post("/documents/{document_id}/approve", include_in_schema=False)
     def approve_from_list(
         document_id: str,
+        background_tasks: BackgroundTasks,
         redirect_query: str = Form(default=""),
         approved_by: str = Form(default=""),
     ) -> RedirectResponse:
+        # Capturamos estado previo para detectar la transición a aprobado.
+        previous = review_service.get_document(document_id)
+        was_approved = bool(previous and previous.approved)
+
         review_service.approve_document(
             document_id=document_id,
             approved_by=approved_by.strip() or settings.default_reviewer,
         )
+
+        # Si pasó de no-aprobado a aprobado, notificar al orquestador.
+        if not was_approved:
+            _enqueue_document_approved(
+                background_tasks=background_tasks,
+                orchestrator=orchestrator_client,
+                document_id=document_id,
+                approved_by=approved_by.strip() or settings.default_reviewer,
+                review_notes=previous.review_notes if previous else None,
+            )
+
         query = redirect_query.strip()
         message = urlencode({"message": "Documento aprobado"})
         if query:
-            glue = "&" if query else ""
             return RedirectResponse(
-                url=f"/documents?{query}{glue}&{message}".replace("?&", "?"),
+                url=f"/documents?{query}&{message}".replace("?&", "?"),
                 status_code=303,
             )
         return RedirectResponse(url=f"/documents?{message}", status_code=303)
@@ -352,6 +397,9 @@ def build_app(settings: Settings) -> FastAPI:
         document_id: str,
         redirect_query: str = Form(default=""),
     ) -> RedirectResponse:
+        # Nota: unapprove NO emite evento al orquestador. Si el revisor
+        # marca como pendiente un documento ya aprobado, el workflow
+        # original ya quedó cerrado en sv7 (estado approved).
         review_service.unapprove_document(document_id=document_id)
         query = redirect_query.strip()
         message = urlencode({"message": "Documento marcado como pendiente"})
@@ -397,6 +445,9 @@ def build_app(settings: Settings) -> FastAPI:
 
     @app.get("/documents/{document_id}/preview", response_class=Response)
     def document_preview(document_id: str) -> Response:
+        # El preview se sirve SIEMPRE desde la información del merge porque es
+        # ahí donde viven las referencias a SharePoint (todos los proveedores
+        # comparten el mismo PDF original).
         document = review_service.get_document(document_id)
         if document is None:
             raise HTTPException(status_code=404, detail="Documento no encontrado")
@@ -527,7 +578,15 @@ def build_app(settings: Settings) -> FastAPI:
     async def save_document_api(
         document_id: str,
         payload: MergeDocumentUpdatePayload,
+        background_tasks: BackgroundTasks,
     ) -> SaveResponse:
+        # Capturamos el estado PREVIO al save para detectar:
+        #   - Si cambia selected_contrato_codigo (a un valor no-nulo).
+        #   - Si pasa de approved=False a approved=True.
+        previous = review_service.get_document(document_id)
+        previous_codigo = previous.selected_contrato_codigo if previous else None
+        was_approved = bool(previous and previous.approved)
+
         try:
             detail = review_service.save_document(
                 document_id=document_id,
@@ -535,6 +594,15 @@ def build_app(settings: Settings) -> FastAPI:
             )
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+        # Notificar al orquestador en BackgroundTask (best-effort).
+        _maybe_notify_orchestrator(
+            background_tasks=background_tasks,
+            orchestrator=orchestrator_client,
+            detail=detail,
+            previous_codigo=previous_codigo,
+            was_approved=was_approved,
+        )
 
         return SaveResponse(
             ok=True,
@@ -551,13 +619,16 @@ def build_app(settings: Settings) -> FastAPI:
             ),
         )
 
-    # ------------------------------------------------------------------ #
-    # ENDPOINT NUEVO: re-fetch manual de contratos desde el portal.
-    # Se invoca desde los botones del alert amarillo en la vista de detalle.
-    # Siempre devuelve 200 con 'status' explicativo en cuerpo, excepto:
+    # ------------------------------------------------------------ #
+    # POST /api/documents/{id}/re-fetch-contratos
+    # Re-buscar contratos manualmente desde el portal cuando el revisor
+    # ha cambiado CIF/obra. Llama directamente a sigrid-api.
+    # Códigos:
+    #  - 200: outcome con status (skipped_missing_data, no_results,
+    #         found_single, found_multiple, sigrid_error)
     #  - 404: documento no existe
     #  - 503: servicio Sigrid no configurado en este servicio
-    # ------------------------------------------------------------------ #
+    # ------------------------------------------------------------ #
     @app.post("/api/documents/{document_id}/re-fetch-contratos")
     def refetch_contratos_api(document_id: str) -> dict:
         service: ContratoRefetchService | None = app.state.contrato_refetch_service
@@ -597,6 +668,69 @@ def build_app(settings: Settings) -> FastAPI:
         return JSONResponse(status_code=404, content={"detail": str(exc)})
 
     return app
+
+
+# ------------------------------------------------------------ #
+# Helpers de notificación al orquestador (best-effort).
+# ------------------------------------------------------------ #
+def _maybe_notify_orchestrator(
+    *,
+    background_tasks: BackgroundTasks,
+    orchestrator: OrchestratorClient,
+    detail: DocumentDetailPayload,
+    previous_codigo: str | None,
+    was_approved: bool,
+) -> None:
+    """Emite eventos al sv7 si cambió el contrato seleccionado o si el
+    documento se acaba de aprobar.
+
+    Best-effort: las llamadas se ejecutan en BackgroundTasks de FastAPI
+    y el cliente HTTP silencia errores. Si sv7 está caído, el save del
+    revisor no se rompe.
+    """
+    now = _utc_iso_now()
+
+    new_codigo = detail.selected_contrato_codigo
+    if new_codigo and new_codigo != previous_codigo:
+        background_tasks.add_task(
+            orchestrator.notify_contract_selected,
+            document_id=detail.id,
+            codigo_contrato=new_codigo,
+            selected_by=detail.approved_by,
+            selected_at_utc=now,
+        )
+
+    if detail.approved and not was_approved:
+        background_tasks.add_task(
+            orchestrator.notify_document_approved,
+            document_id=detail.id,
+            approved_by=detail.approved_by,
+            approved_at_utc=detail.approved_at_utc or now,
+            review_notes=detail.review_notes,
+        )
+
+
+def _enqueue_document_approved(
+    *,
+    background_tasks: BackgroundTasks,
+    orchestrator: OrchestratorClient,
+    document_id: str,
+    approved_by: str | None,
+    review_notes: str | None,
+) -> None:
+    """Helper para el endpoint POST /documents/{id}/approve (aprobación
+    rápida desde la lista, sin pasar por el formulario completo)."""
+    background_tasks.add_task(
+        orchestrator.notify_document_approved,
+        document_id=document_id,
+        approved_by=approved_by,
+        approved_at_utc=_utc_iso_now(),
+        review_notes=review_notes,
+    )
+
+
+def _utc_iso_now() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def _parse_optional_float(value: str | None, *, field_name: str) -> float | None:
@@ -673,10 +807,32 @@ def _preview_error_response(
         <meta charset="utf-8">
         <title>Vista previa no disponible</title>
         <style>
-            body {{ font-family: Arial, sans-serif; background: #f8fafc; color: #1f2937; margin: 0; padding: 24px; }}
-            .card {{ max-width: 720px; margin: 0 auto; background: #ffffff; border: 1px solid #dbe4f0; border-radius: 12px; padding: 24px; box-shadow: 0 8px 24px rgba(15, 23, 42, 0.06); }}
+            body {{
+                font-family: Arial, sans-serif;
+                background: #f8fafc;
+                color: #1f2937;
+                margin: 0;
+                padding: 24px;
+            }}
+            .card {{
+                max-width: 720px;
+                margin: 0 auto;
+                background: #ffffff;
+                border: 1px solid #dbe4f0;
+                border-radius: 12px;
+                padding: 24px;
+                box-shadow: 0 8px 24px rgba(15, 23, 42, 0.06);
+            }}
             h1 {{ margin-top: 0; font-size: 22px; }}
             p {{ line-height: 1.5; }}
+            code {{
+                display: block;
+                white-space: pre-wrap;
+                background: #f1f5f9;
+                border-radius: 8px;
+                padding: 12px;
+                color: #0f172a;
+            }}
             a {{ color: #2563eb; text-decoration: none; }}
         </style>
     </head>
