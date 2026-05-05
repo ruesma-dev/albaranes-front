@@ -5,7 +5,12 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>{{ title }}</title>
-    <link rel="stylesheet" href="{{ request.url_for('static', path='styles.css') }}">
+    {# Cache-buster: un timestamp por arranque del servicio fuerza al
+       navegador a recargar el CSS cuando reiniciamos sv4. Útil
+       durante desarrollo para que un Ctrl+R baste (sin tener que
+       hacer Ctrl+F5). En producción, reiniciar el servicio invalida
+       caches de los clientes automáticamente. #}
+    <link rel="stylesheet" href="{{ request.url_for('static', path='styles.css') }}?v={{ asset_version|default('1') }}">
 </head>
 <body>
 <header class="topbar">
@@ -25,7 +30,7 @@
     {% block content %}{% endblock %}
 </main>
 
-<script src="{{ request.url_for('static', path='app.js') }}"></script>
+<script src="{{ request.url_for('static', path='app.js') }}?v={{ asset_version|default('1') }}"></script>
 {% block scripts %}{% endblock %}
 </body>
 </html>

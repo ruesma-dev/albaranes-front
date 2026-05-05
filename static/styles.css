@@ -457,3 +457,228 @@ textarea { resize: vertical; }
     font-variant-numeric: tabular-nums;
     white-space: nowrap;
 }
+
+/* ================================================================
+ * Bloque de CONCILIACIÓN INLINE (sv4)
+ * Se muestra como una fila expandible bajo cada línea del albarán
+ * cuando el motor de valoración casó esa línea con una línea de
+ * Sigrid (assigned) o creó una línea derivada (derived).
+ * ================================================================ */
+
+/* Celda # con el chevron + número */
+#lines-table td.line-index-cell {
+    white-space: nowrap;
+    text-align: left;
+    padding-left: 6px;
+}
+.js-toggle-concilia.chev {
+    background: transparent;
+    border: 0;
+    padding: 0 4px 0 0;
+    cursor: pointer;
+    color: #6B655C;
+    font-size: 13px;
+    line-height: 1;
+    transition: transform 120ms ease, color 120ms ease;
+    user-select: none;
+}
+.js-toggle-concilia.chev:hover { color: #2C2C2A; }
+.js-toggle-concilia.chev.expanded { color: #2C2C2A; }
+.line-num { font-variant-numeric: tabular-nums; color: #6B655C; }
+
+/* Fila expandible con la conciliación */
+tr.conciliacion-row.hidden { display: none !important; }
+tr.conciliacion-row > td.conciliacion-cell {
+    padding: 0;
+    background: #FAF8F2;
+    border-top: 0;
+}
+
+.concilia-box {
+    padding: 12px 16px 14px 36px;
+    border-left: 3px solid transparent;
+    background: #FAF8F2;
+    font-size: 13px;
+    color: #2C2C2A;
+    line-height: 1.4;
+}
+.concilia-assigned { border-left-color: #5A7A6E; }
+.concilia-derived  { border-left-color: #C68A4A; }
+
+/* Encabezado: badge + descripción */
+.concilia-head {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    flex-wrap: wrap;
+    margin-bottom: 10px;
+}
+.concilia-badge {
+    display: inline-block;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    padding: 2px 8px;
+    border-radius: 10px;
+    flex-shrink: 0;
+}
+.concilia-badge-assigned {
+    background: #E1F0EA;
+    color: #2D5A4E;
+}
+.concilia-badge-derived {
+    background: #F5E8D4;
+    color: #7A5018;
+}
+.concilia-desc {
+    font-weight: 500;
+    color: #2C2C2A;
+}
+
+/* Sub-bloque hermana (futuro: discrepancia de precio) */
+.concilia-sibling {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+    padding: 6px 10px;
+    margin-bottom: 10px;
+    background: #FFF;
+    border: 1px solid #E5DFD2;
+    border-radius: 6px;
+    color: #6B655C;
+    font-size: 12px;
+}
+.concilia-sibling-label {
+    font-weight: 600;
+    color: #993556;
+    margin-right: 4px;
+}
+
+/* Grid de campos (Partida / Unitario / Medición / Pendiente) */
+.concilia-grid {
+    display: grid;
+    grid-template-columns: 1.6fr 1.4fr 1fr 1fr;
+    gap: 14px 24px;
+    align-items: start;
+}
+.concilia-field {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+}
+.concilia-label {
+    font-size: 10.5px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.6px;
+    color: #8A857B;
+}
+.concilia-value {
+    font-size: 13.5px;
+    font-weight: 500;
+    color: #2C2C2A;
+    overflow-wrap: anywhere;
+}
+.concilia-sub {
+    color: #8A857B;
+    font-weight: 400;
+    margin-left: 2px;
+    font-size: 12px;
+}
+
+/* Indicador verde (precio cuadra) */
+.concilia-price-ok {
+    color: #2D6A4F;
+    font-weight: 600;
+}
+.concilia-price-ok .concilia-icon {
+    color: #2D6A4F;
+    margin-right: 4px;
+    font-weight: 700;
+}
+
+/* Indicador rojo/ámbar (precio NO cuadra) */
+.concilia-price-warn {
+    color: #993C1D;
+    font-weight: 600;
+}
+.concilia-price-warn .concilia-icon {
+    color: #993C1D;
+    margin-right: 4px;
+    font-weight: 700;
+}
+.concilia-price-vs {
+    display: inline-block;
+    margin-left: 8px;
+    padding: 1px 6px;
+    background: #FAECE7;
+    color: #993C1D;
+    border-radius: 4px;
+    font-size: 11.5px;
+    font-weight: 500;
+}
+
+/* Responsive ligero (escritorio estrecho ~1100px) */
+@media (max-width: 1200px) {
+    .concilia-grid {
+        grid-template-columns: 1fr 1fr;
+    }
+}
+
+
+/* ================================================================
+ * VISOR PDF colapsable
+ *
+ * Patrón:
+ *   - El split-layout es un CSS Grid de 2 columnas (viewer | editor).
+ *   - Cuando se pulsa "« Ocultar PDF", se añade la clase
+ *     "pdf-collapsed" al split-layout. Eso hace dos cosas:
+ *       1) la columna del viewer (.viewer-panel) se oculta con
+ *          display:none (lo que en grid colapsa esa columna).
+ *       2) el grid pasa a 1fr (sin ancho fijo para viewer).
+ *   - El botón "Mostrar PDF" vive FUERA del grid (justo encima de
+ *     él), oculto por defecto via [hidden]. El JS lo muestra cuando
+ *     el grid está en pdf-collapsed.
+ *
+ * Estado persistido en localStorage (clave global, ver JS).
+ * ================================================================ */
+
+/* Botón "Mostrar PDF" — flotante encima del split-layout.
+   Por defecto oculto (HTML lleva attr "hidden"). El JS le quita el
+   "hidden" cuando el visor está colapsado. */
+.pdf-show-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    margin: 0 0 12px 0;
+    padding: 6px 14px;
+    background: #F1EFE8;
+    border: 1px solid #D6CDBE;
+    border-radius: 6px;
+    cursor: pointer;
+    color: #2C2C2A;
+    font-size: 13px;
+    font-weight: 500;
+    transition: background 120ms ease, color 120ms ease;
+}
+.pdf-show-btn:hover { background: #E7E4DA; }
+.pdf-show-btn[hidden] { display: none !important; }
+
+/* Botón ocultar dentro del header del visor */
+.pdf-hide-btn { margin-left: 8px; }
+
+/* Estado colapsado:
+   - .viewer-panel desaparece del grid.
+   - El grid colapsa naturalmente a 1 columna porque el grid usa
+     "minmax(560px, 1.2fr) minmax(520px, 1fr)" y ambas columnas son
+     fr; cuando .viewer-panel tiene display:none, la otra columna
+     ocupa todo el espacio. */
+.split-layout.pdf-collapsed > .viewer-panel {
+    display: none !important;
+}
+.split-layout.pdf-collapsed {
+    grid-template-columns: 1fr !important;
+}

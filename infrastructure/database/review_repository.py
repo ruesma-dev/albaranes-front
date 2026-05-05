@@ -10,6 +10,8 @@ from sqlalchemy import delete, func, inspect, nullslast, or_, select, text
 
 from domain.models.contrato_sigrid_models import ContratoFromSigrid
 from domain.models.review_models import (
+    ConciliacionDisplay,
+    ConciliacionSibling,
     ContratoPayload,
     DisplayLine,
     DocumentDetailPayload,
@@ -327,6 +329,19 @@ class AlbaranReviewRepository:
                 document_id=merge_doc.id,
             )
 
+            # NUEVO: cargar el mapa de conciliación (qué línea de
+            # contrato — sigrid o derivada — casó con cada línea del
+            # albarán) para mostrar inline en sv4. None si no hay
+            # valoración o ninguna línea tiene matched/derived.
+            conciliation_by_merge_line_id = (
+                self._load_conciliation_map_in_session(
+                    session=session,
+                    valuation=valuation_payload,
+                )
+                if valuation_payload is not None
+                else {}
+            )
+
             if normalized_view == VIEW_MODE_MERGE:
                 return self._build_merge_detail(
                     merge_doc=merge_doc,
@@ -335,6 +350,7 @@ class AlbaranReviewRepository:
                     contratos=contratos_payload,
                     selected_contrato_codigo=selected_contrato_codigo,
                     valuation=valuation_payload,
+                    conciliation_by_merge_line_id=conciliation_by_merge_line_id,
                 )
 
             provider_doc = next(
@@ -349,6 +365,7 @@ class AlbaranReviewRepository:
                     contratos=contratos_payload,
                     selected_contrato_codigo=selected_contrato_codigo,
                     valuation=valuation_payload,
+                    conciliation_by_merge_line_id=conciliation_by_merge_line_id,
                 )
 
             provider_lines = session.scalars(
@@ -569,6 +586,163 @@ class AlbaranReviewRepository:
             synthetic_lines=synthetic_lines,
         )
 
+    # ----------------------------------------------------------------- #
+    # Carga de los datos de conciliación que se muestran inline en sv4
+    # bajo cada línea del albarán.
+    #
+    # Para cada línea valorada (LineValuationPayload from_albaran), se
+    # busca el bloque de detalle a mostrar:
+    #
+    #   - Si tiene matched_contrato_line_id (línea cacheada de Sigrid),
+    #     leemos albaran_contrato_lines_merge.
+    #   - Si tiene derived_contrato_line_id (línea creada por el
+    #     valorador), leemos contrato_lines_derived.
+    #
+    # Las dos consultas son batch (un solo SELECT con IN) para no
+    # disparar N+1.
+    #
+    # Devuelve un dict {merge_line_id -> ConciliacionDisplay}. Líneas
+    # del albarán sin valoración (o cuya valoración no tiene match ni
+    # derived) no aparecen en el dict; el front no muestra el bloque.
+    # ----------------------------------------------------------------- #
+    def _load_conciliation_map_in_session(
+        self,
+        *,
+        session: Any,
+        valuation: ValuationPayload | None,
+    ) -> dict[int, ConciliacionDisplay]:
+        if valuation is None:
+            return {}
+
+        # Paso 1: agrupar por tipo (matched / derived).
+        matched_to_merge: dict[int, int] = {}
+        derived_to_merge: dict[int, int] = {}
+        agreement_by_merge: dict[int, str | None] = {}
+        precio_final_by_merge: dict[int, float | None] = {}
+        for merge_line_id, vline in valuation.lines_by_merge_line_id.items():
+            if merge_line_id is None:
+                continue
+            if vline.matched_contrato_line_id is not None:
+                matched_to_merge[vline.matched_contrato_line_id] = merge_line_id
+            elif vline.derived_contrato_line_id is not None:
+                derived_to_merge[vline.derived_contrato_line_id] = merge_line_id
+            agreement_by_merge[merge_line_id] = vline.precio_unitario_agreement
+            precio_final_by_merge[merge_line_id] = vline.precio_unitario_final
+
+        out: dict[int, ConciliacionDisplay] = {}
+
+        # Paso 2: cargar líneas matched (de Sigrid cacheadas) en bloque.
+        if matched_to_merge:
+            try:
+                rows = session.execute(
+                    text(
+                        "SELECT id, descripcion_linea, unidad_medida, "
+                        "       precio_unitario, uds, pendiente_servir, "
+                        "       codigo_partida, descripcion_partida "
+                        "FROM albaran_contrato_lines_merge "
+                        "WHERE id = ANY(:ids)"
+                    ),
+                    {"ids": list(matched_to_merge.keys())},
+                ).mappings().all()
+            except Exception:
+                # Postgres con sqlalchemy soporta ANY(:ids) con lista.
+                # Si la BBDD no fuese postgres y fallara, usamos IN clásico.
+                session.rollback()
+                ids = list(matched_to_merge.keys())
+                placeholders = ", ".join(f":id_{i}" for i in range(len(ids)))
+                params = {f"id_{i}": v for i, v in enumerate(ids)}
+                rows = session.execute(
+                    text(
+                        f"SELECT id, descripcion_linea, unidad_medida, "
+                        f"       precio_unitario, uds, pendiente_servir, "
+                        f"       codigo_partida, descripcion_partida "
+                        f"FROM albaran_contrato_lines_merge "
+                        f"WHERE id IN ({placeholders})"
+                    ),
+                    params,
+                ).mappings().all()
+
+            for row in rows:
+                merge_line_id = matched_to_merge.get(row["id"])
+                if merge_line_id is None:
+                    continue
+                out[merge_line_id] = ConciliacionDisplay(
+                    kind="assigned",
+                    descripcion=row.get("descripcion_linea"),
+                    unitario=row.get("precio_unitario"),
+                    medicion_total=row.get("uds"),
+                    medicion_pendiente=row.get("pendiente_servir"),
+                    unidad=row.get("unidad_medida"),
+                    codigo_partida=row.get("codigo_partida"),
+                    descripcion_partida=row.get("descripcion_partida"),
+                    price_agreement=agreement_by_merge.get(merge_line_id),
+                    precio_unitario_final=precio_final_by_merge.get(merge_line_id),
+                    sibling=None,
+                )
+
+        # Paso 3: cargar líneas derived (creadas por el valorador) en bloque.
+        # Esquema esperado de contrato_lines_derived (ver sv6):
+        #   id, descripcion, unidad_medida, precio_unitario, uds,
+        #   codigo_partida, descripcion_partida, origen.
+        if derived_to_merge:
+            try:
+                rows = session.execute(
+                    text(
+                        "SELECT id, descripcion, unidad_medida, "
+                        "       precio_unitario, uds, "
+                        "       codigo_partida, descripcion_partida, "
+                        "       origen "
+                        "FROM contrato_lines_derived "
+                        "WHERE id = ANY(:ids)"
+                    ),
+                    {"ids": list(derived_to_merge.keys())},
+                ).mappings().all()
+            except Exception:
+                session.rollback()
+                ids = list(derived_to_merge.keys())
+                placeholders = ", ".join(f":id_{i}" for i in range(len(ids)))
+                params = {f"id_{i}": v for i, v in enumerate(ids)}
+                try:
+                    rows = session.execute(
+                        text(
+                            f"SELECT id, descripcion, unidad_medida, "
+                            f"       precio_unitario, uds, "
+                            f"       codigo_partida, descripcion_partida, "
+                            f"       origen "
+                            f"FROM contrato_lines_derived "
+                            f"WHERE id IN ({placeholders})"
+                        ),
+                        params,
+                    ).mappings().all()
+                except Exception:
+                    # Tabla no existe (BBDD anterior a sv6 con derived).
+                    session.rollback()
+                    rows = []
+
+            for row in rows:
+                merge_line_id = derived_to_merge.get(row["id"])
+                if merge_line_id is None:
+                    continue
+                out[merge_line_id] = ConciliacionDisplay(
+                    kind="derived",
+                    descripcion=row.get("descripcion"),
+                    unitario=row.get("precio_unitario"),
+                    medicion_total=row.get("uds"),
+                    medicion_pendiente=None,  # derived: no hay pendiente
+                    unidad=row.get("unidad_medida"),
+                    codigo_partida=row.get("codigo_partida"),
+                    descripcion_partida=row.get("descripcion_partida"),
+                    price_agreement=agreement_by_merge.get(merge_line_id),
+                    precio_unitario_final=precio_final_by_merge.get(merge_line_id),
+                    # sibling se rellena en una iteración futura cuando
+                    # contrato_lines_derived tenga el FK a la línea
+                    # hermana de Sigrid en caso de discrepancia de
+                    # precio. Hoy queda None.
+                    sibling=None,
+                )
+
+        return out
+
     def _build_merge_detail(
         self,
         *,
@@ -578,6 +752,7 @@ class AlbaranReviewRepository:
         contratos: list[ContratoPayload],
         selected_contrato_codigo: str | None,
         valuation: ValuationPayload | None = None,
+        conciliation_by_merge_line_id: dict[int, ConciliacionDisplay] | None = None,
     ) -> DocumentDetailPayload:
         merge_lines_payload = [
             self._merge_line_to_payload(line) for line in merge_doc.lines
@@ -585,6 +760,7 @@ class AlbaranReviewRepository:
         display_lines = self._build_display_lines(
             merge_lines=merge_lines_payload,
             valuation=valuation,
+            conciliation_by_merge_line_id=conciliation_by_merge_line_id or {},
         )
         return DocumentDetailPayload(
             id=merge_doc.id,
@@ -1355,12 +1531,16 @@ class AlbaranReviewRepository:
         *,
         merge_lines: list[MergeLinePayload],
         valuation: ValuationPayload | None,
+        conciliation_by_merge_line_id: dict[int, ConciliacionDisplay] | None = None,
     ) -> list[DisplayLine]:
         val_lines_by_merge = (
             valuation.lines_by_merge_line_id if valuation else {}
         )
         synthetic_all = (
             list(valuation.synthetic_lines) if valuation else []
+        )
+        conc_map: dict[int, ConciliacionDisplay] = (
+            conciliation_by_merge_line_id or {}
         )
 
         # Agrupar sintéticas por parent_merge_line_id (int | None).
@@ -1411,6 +1591,7 @@ class AlbaranReviewRepository:
                     confianza_pct=line.confianza_pct,
                     is_valued=v is not None,
                     parent_merge_line_id=None,
+                    concilia=conc_map.get(line.id) if line.id is not None else None,
                 )
             )
 

@@ -102,8 +102,21 @@
     </div>
 {% endif %}
 
-<section class="split-layout">
-    <aside class="panel viewer-panel">
+{# Botón "Mostrar PDF" — visible SOLO cuando el visor está colapsado.
+   Va fuera del split-layout (que es CSS Grid de 2 columnas) para no
+   romper la rejilla. Estado persistido en localStorage. #}
+<button type="button"
+        id="pdfShowBtn"
+        class="pdf-show-btn"
+        title="Mostrar visor de PDF"
+        aria-label="Mostrar visor de PDF"
+        hidden>
+    <span aria-hidden="true">▶</span>
+    Mostrar PDF
+</button>
+
+<section class="split-layout" id="splitLayout">
+    <aside class="panel viewer-panel" id="viewerPanel">
         <div class="panel-header">
             <h2>Documento</h2>
             <div class="meta-inline">
@@ -115,6 +128,10 @@
                         {{ '%.1f'|format(document.confidence_pct_calc) }}%
                     </span>
                 {% endif %}
+                <button type="button"
+                        id="pdfHideBtn"
+                        class="btn secondary small pdf-hide-btn"
+                        title="Ocultar visor de PDF">« Ocultar PDF</button>
             </div>
         </div>
         {% if preview_enabled %}
@@ -388,7 +405,15 @@
                             <tr data-line-kind="{{ dline.line_kind }}"
                                 data-line-id="{{ dline.merge_line_id if dline.merge_line_id is not none else '' }}"
                                 data-valuation-line-id="{{ dline.valuation_line_id if dline.valuation_line_id is not none else '' }}">
-                                <td>{{ loop.index }}</td>
+                                <td class="line-index-cell">
+                                    {% if dline.concilia %}
+                                        <button type="button"
+                                                class="js-toggle-concilia chev"
+                                                aria-expanded="false"
+                                                title="Mostrar conciliación">▸</button>
+                                    {% endif %}
+                                    <span class="line-num">{{ loop.index }}</span>
+                                </td>
                                 <td>
                                     <input type="text"
                                            data-field="codigo_imputacion"
@@ -482,6 +507,114 @@
                                     {% endif %}
                                 </td>
                             </tr>
+                            {# Fila expandible con la conciliación inline.
+                               Solo se renderiza si el motor casó la línea
+                               con algo (matched o derived). El JS la
+                               muestra/oculta con la chevron de la fila
+                               anterior. #}
+                            {% if dline.concilia %}
+                                {% set c = dline.concilia %}
+                                <tr class="conciliacion-row hidden"
+                                    data-for-line-id="{{ dline.merge_line_id if dline.merge_line_id is not none else '' }}">
+                                    <td colspan="10" class="conciliacion-cell">
+                                        <div class="concilia-box concilia-{{ c.kind }}">
+                                            {# Encabezado segun kind #}
+                                            {% if c.kind == 'assigned' %}
+                                                <div class="concilia-head">
+                                                    <span class="concilia-badge concilia-badge-assigned">Línea de Sigrid</span>
+                                                    <span class="concilia-desc">{{ c.descripcion or '—' }}</span>
+                                                </div>
+                                            {% else %}
+                                                <div class="concilia-head">
+                                                    <span class="concilia-badge concilia-badge-derived">Línea nueva creada</span>
+                                                    <span class="concilia-desc">{{ c.descripcion or '—' }}</span>
+                                                </div>
+                                            {% endif %}
+
+                                            {# Sub-bloque hermana (solo para 'derived' con discrepancia
+                                               de precio). Hoy siempre None — el espacio queda reservado
+                                               para futuro. #}
+                                            {% if c.sibling %}
+                                                <div class="concilia-sibling">
+                                                    <span class="concilia-sibling-label">Hermana en Sigrid (precio no cuadraba):</span>
+                                                    <span>{{ c.sibling.descripcion or '—' }}</span>
+                                                    <span>·</span>
+                                                    <span>{{ c.sibling.codigo_partida or '—' }}</span>
+                                                    <span>·</span>
+                                                    <span>{{ c.sibling.unitario | importe_eur }} / {{ c.sibling.unidad or '—' }}</span>
+                                                </div>
+                                            {% endif %}
+
+                                            {# Grid con los 4 datos clave #}
+                                            <div class="concilia-grid">
+                                                <div class="concilia-field">
+                                                    <span class="concilia-label">Partida</span>
+                                                    <span class="concilia-value">
+                                                        {{ c.codigo_partida or '—' }}
+                                                        {% if c.descripcion_partida %}
+                                                            <span class="concilia-sub">· {{ c.descripcion_partida }}</span>
+                                                        {% endif %}
+                                                    </span>
+                                                </div>
+                                                <div class="concilia-field">
+                                                    <span class="concilia-label">Unitario</span>
+                                                    {# Color/icono según price_agreement.
+                                                       'agree'    -> verde + ✓
+                                                       'disagree' -> rojo  + ⚠ + precio valorado al lado
+                                                       None       -> sin marca #}
+                                                    {% if c.price_agreement == 'agree' %}
+                                                        <span class="concilia-value concilia-price-ok">
+                                                            <span class="concilia-icon" aria-hidden="true">✓</span>
+                                                            {{ c.unitario | importe_eur }}
+                                                            {% if c.unidad %}<span class="concilia-sub">/ {{ c.unidad }}</span>{% endif %}
+                                                        </span>
+                                                    {% elif c.price_agreement == 'disagree' %}
+                                                        <span class="concilia-value concilia-price-warn">
+                                                            <span class="concilia-icon" aria-hidden="true">⚠</span>
+                                                            {{ c.unitario | importe_eur }}
+                                                            {% if c.unidad %}<span class="concilia-sub">/ {{ c.unidad }}</span>{% endif %}
+                                                            {% if c.precio_unitario_final is not none %}
+                                                                <span class="concilia-price-vs">
+                                                                    valoración: {{ c.precio_unitario_final | importe_eur }}
+                                                                </span>
+                                                            {% endif %}
+                                                        </span>
+                                                    {% else %}
+                                                        <span class="concilia-value">
+                                                            {% if c.unitario is not none %}
+                                                                {{ c.unitario | importe_eur }}
+                                                                {% if c.unidad %}<span class="concilia-sub">/ {{ c.unidad }}</span>{% endif %}
+                                                            {% else %}
+                                                                —
+                                                            {% endif %}
+                                                        </span>
+                                                    {% endif %}
+                                                </div>
+                                                <div class="concilia-field">
+                                                    <span class="concilia-label">Medición total</span>
+                                                    <span class="concilia-value">
+                                                        {% if c.medicion_total is not none %}
+                                                            {{ '%.2f'|format(c.medicion_total) }}
+                                                            {% if c.unidad %}<span class="concilia-sub">{{ c.unidad }}</span>{% endif %}
+                                                        {% else %}—{% endif %}
+                                                    </span>
+                                                </div>
+                                                <div class="concilia-field">
+                                                    <span class="concilia-label">Pendiente</span>
+                                                    <span class="concilia-value">
+                                                        {% if c.medicion_pendiente is not none %}
+                                                            {{ '%.2f'|format(c.medicion_pendiente) }}
+                                                            {% if c.unidad %}<span class="concilia-sub">{{ c.unidad }}</span>{% endif %}
+                                                        {% elif c.kind == 'derived' %}
+                                                            <span class="concilia-sub">n/a (línea nueva)</span>
+                                                        {% else %}—{% endif %}
+                                                    </span>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </td>
+                                </tr>
+                            {% endif %}
                         {% endfor %}
                         </tbody>
                     </table>
@@ -626,4 +759,111 @@
         window.reviewDocumentId = {{ document.id | tojson }};
     </script>
 {% endif %}
+<script>
+    // ----------------------------------------------------------------- //
+    // DIAGNÓSTICO de carga de CSS.
+    //
+    // Si las reglas .concilia-box / .conciliacion-row no están en el
+    // CSS cargado, las clases van pero el navegador no las pinta. Eso
+    // indica caché agresiva. El diagnóstico avisa por consola.
+    // ----------------------------------------------------------------- //
+    (function () {
+        var hasRule = false;
+        try {
+            for (var i = 0; i < document.styleSheets.length; i++) {
+                var sheet = document.styleSheets[i];
+                var rules;
+                try { rules = sheet.cssRules || sheet.rules; }
+                catch (e) { continue; /* CORS u otro */ }
+                if (!rules) continue;
+                for (var j = 0; j < rules.length; j++) {
+                    if (rules[j].selectorText &&
+                        rules[j].selectorText.indexOf("concilia-box") !== -1) {
+                        hasRule = true;
+                        break;
+                    }
+                }
+                if (hasRule) break;
+            }
+        } catch (e) { /* ignorar */ }
+        if (!hasRule) {
+            console.warn(
+                "[sv4] AVISO: las reglas CSS de .concilia-box no están " +
+                "cargadas. Probablemente el navegador tiene caché del " +
+                "styles.css antiguo. Haz Ctrl+F5 para forzar recarga, " +
+                "o reinicia sv4 (cache-buster nuevo)."
+            );
+        } else {
+            console.log("[sv4] CSS de conciliación detectado OK.");
+        }
+    })();
+
+    // ----------------------------------------------------------------- //
+    // Toggle de filas de conciliación (chevron en la columna #).
+    // Cada chevron de fila controla la fila inmediatamente siguiente
+    // (tr.conciliacion-row). Al click alterna la clase "hidden" en la
+    // fila siguiente y "expanded" en el botón.
+    // ----------------------------------------------------------------- //
+    (function () {
+        document.addEventListener("click", function (ev) {
+            var btn = ev.target.closest(".js-toggle-concilia");
+            if (!btn) return;
+            var tr = btn.closest("tr");
+            if (!tr) return;
+            var next = tr.nextElementSibling;
+            if (!next || !next.classList.contains("conciliacion-row")) return;
+            var isHidden = next.classList.toggle("hidden");
+            btn.setAttribute("aria-expanded", String(!isHidden));
+            btn.classList.toggle("expanded", !isHidden);
+            btn.textContent = isHidden ? "▸" : "▾";
+        });
+    })();
+
+    // ----------------------------------------------------------------- //
+    // Colapsar / expandir el visor de PDF.
+    // Estado persistente en localStorage por usuario (clave global, no
+    // por documento — el revisor habitualmente prefiere mantener su
+    // ajuste durante toda la sesión). Si en el futuro queremos
+    // recordarlo por documento, basta con cambiar la clave a
+    // 'pdfCollapsed:' + documentId.
+    //
+    // Patrón: el botón "Mostrar PDF" vive fuera del grid (split-layout),
+    // como elemento hermano antes. Por defecto tiene attr "hidden". El
+    // JS lo hace visible cuando se colapsa, y le pone "hidden" otra vez
+    // cuando se expande. El visor (.viewer-panel) se oculta vía CSS
+    // cuando el grid lleva la clase ".pdf-collapsed".
+    // ----------------------------------------------------------------- //
+    (function () {
+        var STORAGE_KEY = "sv4.pdfCollapsed";
+        var layout = document.getElementById("splitLayout");
+        var hideBtn = document.getElementById("pdfHideBtn");
+        var showBtn = document.getElementById("pdfShowBtn");
+        if (!layout || !hideBtn || !showBtn) return;
+
+        function setCollapsed(collapsed) {
+            layout.classList.toggle("pdf-collapsed", collapsed);
+            // Mostrar/ocultar el botón "Mostrar PDF" via attr hidden.
+            if (collapsed) {
+                showBtn.removeAttribute("hidden");
+            } else {
+                showBtn.setAttribute("hidden", "");
+            }
+            try {
+                localStorage.setItem(STORAGE_KEY, collapsed ? "1" : "0");
+            } catch (e) {
+                // ignorar — privado, modo incógnito, etc.
+            }
+        }
+
+        // Estado inicial: leer de localStorage.
+        var saved = null;
+        try {
+            saved = localStorage.getItem(STORAGE_KEY);
+        } catch (e) { /* idem */ }
+        if (saved === "1") setCollapsed(true);
+
+        hideBtn.addEventListener("click", function () { setCollapsed(true); });
+        showBtn.addEventListener("click", function () { setCollapsed(false); });
+    })();
+</script>
 {% endblock %}

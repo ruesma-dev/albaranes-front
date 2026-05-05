@@ -257,6 +257,64 @@ class ValuationPayload(BaseModel):
 
 
 # ====================================================================== #
+class ConciliacionDisplay(BaseModel):
+    """Datos de la conciliación que se muestran inline bajo cada línea
+    del albarán en sv4. NO contiene lógica — solo lo que el revisor
+    debe ver: con qué línea casó (Sigrid o derivada) y si el precio
+    coincide con la valoración.
+
+    Lo rellena el repositorio (sv4) haciendo JOIN entre
+    ``albaran_line_valuations`` (que sabe a qué línea casó: bien
+    ``matched_contrato_line_id`` para una línea cacheada de Sigrid,
+    bien ``derived_contrato_line_id`` para una línea creada por el
+    valorador) y la tabla correspondiente.
+
+    Si una línea del albarán no tiene valoración, ``concilia`` será
+    None y la UI no muestra nada para esa fila.
+    """
+
+    # 'assigned' = la valoración casó con una línea cacheada de Sigrid
+    #              (albaran_contrato_lines_merge).
+    # 'derived'  = la valoración creó una línea nueva en
+    #              contrato_lines_derived (porque no había hermana en
+    #              Sigrid o el precio no cuadraba).
+    kind: str
+
+    # Datos a mostrar (vienen de la tabla origen según kind):
+    descripcion: str | None = None
+    unitario: float | None = None
+    medicion_total: float | None = None
+    medicion_pendiente: float | None = None
+    unidad: str | None = None
+    codigo_partida: str | None = None
+    descripcion_partida: str | None = None
+
+    # Indicador verde/rojo. Lo decide el motor (no el front):
+    #   'agree'    -> precio del contrato coincide con el valorado
+    #   'disagree' -> precio difiere
+    #   None       -> no hay precio del contrato comparable (ej. línea
+    #                 derived sin hermana de Sigrid)
+    price_agreement: str | None = None
+    precio_unitario_final: float | None = None  # el de la valoración
+
+    # Solo para kind='derived': si la línea nueva se creó por
+    # discrepancia de precio con una línea hermana de Sigrid, esta
+    # caja lleva los datos de esa hermana para que el revisor lo vea.
+    # None si la nueva se creó porque no había hermana en absoluto.
+    sibling: "ConciliacionSibling | None" = None
+
+
+class ConciliacionSibling(BaseModel):
+    """Datos de la línea hermana de Sigrid que existió pero no se
+    usó por discrepancia de precio. Solo aplica a líneas derived
+    de origen 'price_mismatch' (futuro). Hoy se rellena None y el
+    template oculta el sub-bloque."""
+    descripcion: str | None = None
+    unitario: float | None = None
+    unidad: str | None = None
+    codigo_partida: str | None = None
+
+
 # Sub-tanda 2D — DisplayLine
 #
 # DTO uniforme para la tabla de líneas del detalle. Mezcla las líneas
@@ -295,6 +353,11 @@ class DisplayLine(BaseModel):
     # Sub-campos que el template solo usa en modo traza (no de entrada).
     is_valued: bool = False                # True si hay valoración ligada
     parent_merge_line_id: int | None = None  # sintéticas: a qué base cuelgan
+
+    # Bloque de conciliación inline. Solo no-None para líneas
+    # 'from_albaran' que tienen una valoración (matched o derived).
+    # El template lo renderiza en una fila expandible bajo la línea.
+    concilia: ConciliacionDisplay | None = None
 
 
 class DocumentDetailPayload(BaseModel):
