@@ -688,7 +688,7 @@ class AlbaranReviewRepository:
             try:
                 rows = session.execute(
                     text(
-                        "SELECT id, descripcion, unidad_medida, "
+                        "SELECT id, descripcion_linea, unidad_medida, "
                         "       precio_unitario, uds, "
                         "       codigo_partida, descripcion_partida, "
                         "       origen "
@@ -705,7 +705,7 @@ class AlbaranReviewRepository:
                 try:
                     rows = session.execute(
                         text(
-                            f"SELECT id, descripcion, unidad_medida, "
+                            f"SELECT id, descripcion_linea, unidad_medida, "
                             f"       precio_unitario, uds, "
                             f"       codigo_partida, descripcion_partida, "
                             f"       origen "
@@ -725,7 +725,7 @@ class AlbaranReviewRepository:
                     continue
                 out[merge_line_id] = ConciliacionDisplay(
                     kind="derived",
-                    descripcion=row.get("descripcion"),
+                    descripcion=row.get("descripcion_linea"),
                     unitario=row.get("precio_unitario"),
                     medicion_total=row.get("uds"),
                     medicion_pendiente=None,  # derived: no hay pendiente
