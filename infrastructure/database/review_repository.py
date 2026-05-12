@@ -8,7 +8,6 @@ from urllib.parse import urlencode
 
 from sqlalchemy import delete, func, inspect, nullslast, or_, select, text
 
-from domain.models.contrato_sigrid_models import ContratoFromSigrid
 from domain.models.review_models import (
     ConciliacionDisplay,
     ConciliacionSibling,
@@ -867,133 +866,20 @@ class AlbaranReviewRepository:
                 return None, None
             return document.proveedor_cif, document.obra_codigo
 
-    def get_existing_pdf_paths(
-        self,
-        *,
-        document_id: str,
-    ) -> dict[str, tuple[int | None, str | None, str | None]]:
-        self.initialize()
-        result: dict[str, tuple[int | None, str | None, str | None]] = {}
-        with self._session_factory.create_session() as session:
-            rows = session.execute(
-                select(
-                    AlbaranContratoMergeOrm.codigo_contrato,
-                    AlbaranContratoMergeOrm.gra_rep_ide,
-                    AlbaranContratoMergeOrm.pdf_sharepoint_relative_path,
-                    AlbaranContratoMergeOrm.pdf_sharepoint_web_url,
-                ).where(AlbaranContratoMergeOrm.document_id == document_id)
-            ).all()
-            for codigo, ide, rel_path, web_url in rows:
-                result[codigo] = (ide, rel_path, web_url)
-        return result
-
-    def replace_contratos_and_select(
-        self,
-        *,
-        document_id: str,
-        contratos: list[ContratoFromSigrid],
-        selected_codigo: str | None,
-    ) -> None:
-        self.initialize()
-        now = datetime.now(timezone.utc).isoformat()
-        with self._session_factory.create_session() as session:
-            merge_doc = session.get(AlbaranDocumentMergeOrm, document_id)
-            if merge_doc is None:
-                raise KeyError(f"Documento merge no encontrado: {document_id}")
-
-            session.execute(
-                delete(AlbaranContratoMergeOrm).where(
-                    AlbaranContratoMergeOrm.document_id == document_id
-                )
-            )
-            session.flush()
-
-            for contrato in contratos:
-                header_orm = AlbaranContratoMergeOrm(
-                    document_id=document_id,
-                    codigo_contrato=contrato.codigo_contrato,
-                    nombre_contrato=contrato.nombre_contrato,
-                    fecha_alta_contrato=contrato.fecha_alta_contrato,
-                    fecha_contrato=contrato.fecha_contrato,
-                    vigencia_desde=contrato.vigencia_desde,
-                    vigencia_hasta=contrato.vigencia_hasta,
-                    importe_total=contrato.importe_total,
-                    cif_proveedor=contrato.cif_proveedor,
-                    nombre_proveedor=contrato.nombre_proveedor,
-                    codigo_obra=contrato.codigo_obra,
-                    nombre_obra=contrato.nombre_obra,
-                    gra_rep_ide=contrato.gra_rep_ide,
-                    pdf_sharepoint_relative_path=contrato.pdf_sharepoint_relative_path,
-                    pdf_sharepoint_web_url=contrato.pdf_sharepoint_web_url,
-                    fetched_at_utc=now,
-                )
-                session.add(header_orm)
-                session.flush()
-
-                for line in (contrato.lines or []):
-                    session.add(
-                        AlbaranContratoLineMergeOrm(
-                            contrato_id=header_orm.id,
-                            codigo_contrato=contrato.codigo_contrato,
-                            linea=line.linea,
-                            numero_linea=line.numero_linea,
-                            codigo_producto=line.codigo_producto,
-                            codigo_alternativo=line.codigo_alternativo,
-                            unidad_medida=line.unidad_medida,
-                            descripcion_linea=line.descripcion_linea,
-                            uds=line.uds,
-                            cantidad_servida=line.cantidad_servida,
-                            cantidad_facturada=line.cantidad_facturada,
-                            pendiente_servir=line.pendiente_servir,
-                            precio_unitario=line.precio_unitario,
-                            precio_bruto=line.precio_bruto,
-                            descuentos=line.descuentos,
-                            importe_linea=line.importe_linea,
-                            cuota_iva=line.cuota_iva,
-                            doc_origen=line.doc_origen,
-                            codigo_partida=line.codigo_partida,
-                            descripcion_partida=line.descripcion_partida,
-                            fetched_at_utc=now,
-                        )
-                    )
-
-            session.execute(
-                text(
-                    "UPDATE albaran_documents_merge "
-                    "SET selected_contrato_codigo = :codigo "
-                    "WHERE id = :doc_id"
-                ),
-                {"codigo": selected_codigo, "doc_id": document_id},
-            )
-
-            session.commit()
-
-    def update_contrato_pdf_paths(
-        self,
-        *,
-        document_id: str,
-        codigo_contrato: str,
-        relative_path: str | None,
-        web_url: str | None,
-    ) -> None:
-        self.initialize()
-        with self._session_factory.create_session() as session:
-            session.execute(
-                text(
-                    "UPDATE albaran_contratos_merge "
-                    "SET pdf_sharepoint_relative_path = :rel, "
-                    "    pdf_sharepoint_web_url = :url "
-                    "WHERE document_id = :doc_id "
-                    "  AND codigo_contrato = :codigo"
-                ),
-                {
-                    "rel": relative_path,
-                    "url": web_url,
-                    "doc_id": document_id,
-                    "codigo": codigo_contrato,
-                },
-            )
-            session.commit()
+    # ---------------------------------------------------------------- #
+    # NOTA REFACTOR (mayo 2026): se eliminaron de aquí 3 métodos
+    # obsoletos que pertenecían al wiring antiguo (cuando el sv4
+    # llamaba a Sigrid directamente):
+    #
+    #   * get_existing_pdf_paths
+    #   * replace_contratos_and_select
+    #   * update_contrato_pdf_paths
+    #
+    # Esa responsabilidad ahora vive ÍNTEGRAMENTE en el sv3, que
+    # es el dueño de las tablas albaran_contratos_merge y
+    # albaran_contrato_lines_merge (con UPSERT por sigrid_ide).
+    # El sv4 solo LEE esas tablas para pintar el portal.
+    # ---------------------------------------------------------------- #
 
     def update_document(
         self,

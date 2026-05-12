@@ -1,56 +1,40 @@
 # domain/ports/contrato_refetch_port.py
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Protocol
 
-from domain.models.contrato_sigrid_models import ContratoFromSigrid
+from domain.models.contrato_refetch_models import ContratoRefetchOutcome
 
 
-@dataclass(frozen=True)
-class ContratoPdfPayload:
-    """Binario + nombre original del PDF descargado de Sigrid."""
+class ContratoRefetchClient(Protocol):
+    """Puerto del re-fetch de contratos desde el portal.
 
-    filename: str
-    content: bytes
-    content_type: str | None
+    Esta abstracción permite que el endpoint del sv4 no sepa si
+    detrás hay una llamada HTTP al sv3 (caso real, post-refactor),
+    un mock para tests, o una implementación que llame a Sigrid
+    directamente (caso histórico, ya eliminado del wiring).
 
+    Una sola operación: dado un ``document_id``, refrescar la lista
+    de contratos asociados leyendo los datos actuales del merge
+    (CIF + obra) y devolver el outcome.
+    """
 
-class ContratoLookupClient(Protocol):
-    """Cliente que consulta contratos y descarga sus PDFs del ERP."""
+    def refetch(
+        self, *, document_id: str,
+    ) -> ContratoRefetchOutcome:
+        """Re-busca contratos para el documento dado.
 
-    def fetch_contratos(
-        self,
-        *,
-        cif_proveedor: str,
-        codigo_obra_normalizado: str,
-    ) -> list[ContratoFromSigrid]:
-        ...
+        Idempotente. Se asume que CIF y obra en el merge ya están
+        actualizados (el portal guarda primero y refetch después).
 
-    def download_contrato_pdf(
-        self,
-        *,
-        gra_rep_ide: int,
-    ) -> ContratoPdfPayload | None:
-        """Descarga el PDF por ``ruesma_rep.gra.ide``. None si no hay."""
-        ...
-
-
-@dataclass(frozen=True)
-class StoredContratoPdf:
-    relative_path: str
-    web_url: str | None
-
-
-class ContratoPdfStorage(Protocol):
-    """Puerto para subir el PDF de contrato al storage (SharePoint)."""
-
-    def upload_contrato_pdf(
-        self,
-        *,
-        filename: str,
-        file_bytes: bytes,
-        codigo_contrato: str,
-        gra_rep_ide: int,
-    ) -> StoredContratoPdf:
+        Raises
+        ------
+        KeyError
+            Si el documento no existe en el merge (404 al front).
+        RuntimeError
+            Si el sv3 no está disponible u otro fallo de transporte
+            no diagnosticable. NO se levanta para errores de Sigrid
+            ni para "0 contratos encontrados" — eso va dentro del
+            outcome (``status="sigrid_error"`` o ``"no_results"``).
+        """
         ...

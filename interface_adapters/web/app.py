@@ -14,9 +14,9 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Resp
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from application.services.contrato_refetch_service import ContratoRefetchService
 from application.services.review_service import ReviewService
 from config.settings import Settings
+from domain.models.contrato_refetch_models import ContratoRefetchOutcome
 from domain.models.review_models import (
     DocumentDetailPayload,
     DocumentListFilters,
@@ -26,13 +26,11 @@ from domain.models.review_models import (
     VIEW_MODE_MERGE,
     normalize_view_mode,
 )
+from domain.ports.contrato_refetch_port import ContratoRefetchClient
 from infrastructure.database.review_repository import AlbaranReviewRepository
 from infrastructure.database.session_factory import SessionFactory
 from infrastructure.graph.token_provider import GraphTokenProvider
-from infrastructure.sigrid.sigrid_api_contrato_client import SigridApiContratoClient
-from infrastructure.storage.sharepoint_contrato_pdf_storage import (
-    SharePointContratoPdfStorage,
-)
+from infrastructure.http.sv3_refetch_client import Sv3RefetchClient
 
 logger = logging.getLogger(__name__)
 
@@ -83,78 +81,14 @@ def _format_importe_eur(value: Any) -> str:
     return f"{formatted} €"
 
 
-def _build_contrato_pdf_storage(
-    settings: Settings,
-) -> SharePointContratoPdfStorage | None:
-    """Construye el storage de PDFs de contrato reutilizando las MISMAS
-    variables que el servicio 3 (``SHAREPOINT_*``).
-
-    Devuelve None si no hay ``graph_key`` o faltan settings clave para
-    el modo configurado. El ContratoRefetchService se construirá sin
-    pdf_storage y se saltará la descarga/subida de PDFs.
-    """
-    graph_key = getattr(settings, "graph_key", None)
-    if not graph_key:
-        logger.warning(
-            "[contrato-pdf][wiring] GRAPH_KEY vacío; no se subirán PDFs "
-            "de contrato tras el re-fetch."
-        )
-        return None
-
-    mode = str(getattr(settings, "sharepoint_mode", "drive_id") or "drive_id")
-    drive_id = getattr(settings, "sharepoint_drive_id", None)
-    folder_url = getattr(settings, "sharepoint_folder_url", None)
-    hostname = getattr(settings, "sharepoint_hostname", None)
-    site_path = getattr(settings, "sharepoint_site_path", None)
-
-    if mode == "drive_id" and not drive_id:
-        logger.warning(
-            "[contrato-pdf][wiring] SHAREPOINT_MODE=drive_id pero falta "
-            "SHAREPOINT_DRIVE_ID; no se subirán PDFs de contrato."
-        )
-        return None
-    if mode == "folder_url" and not folder_url:
-        logger.warning(
-            "[contrato-pdf][wiring] SHAREPOINT_MODE=folder_url pero falta "
-            "SHAREPOINT_FOLDER_URL; no se subirán PDFs de contrato."
-        )
-        return None
-    if mode == "site_path" and (not hostname or not site_path):
-        logger.warning(
-            "[contrato-pdf][wiring] SHAREPOINT_MODE=site_path pero faltan "
-            "SHAREPOINT_HOSTNAME/SHAREPOINT_SITE_PATH; no se subirán PDFs."
-        )
-        return None
-
-    try:
-        storage = SharePointContratoPdfStorage(
-            graph_key=graph_key,
-            timeout_s=int(getattr(settings, "graph_timeout_s", 30) or 30),
-            mode=mode,  # type: ignore[arg-type]
-            hostname=hostname,
-            site_path=site_path,
-            drive_name=str(
-                getattr(settings, "sharepoint_drive_name", "Documentos") or "Documentos"
-            ),
-            drive_id=drive_id,
-            folder_root=str(
-                getattr(settings, "sharepoint_folder_root", "albaranes")
-                or "albaranes"
-            ),
-            folder_url=folder_url,
-        )
-    except Exception:
-        logger.exception(
-            "[contrato-pdf][wiring] ERROR construyendo "
-            "SharePointContratoPdfStorage; no se subirán PDFs de contrato."
-        )
-        return None
-
-    logger.info(
-        "[contrato-pdf][wiring] SharePointContratoPdfStorage ACTIVADO mode=%s",
-        mode,
-    )
-    return storage
+# NOTA REFACTOR (mayo 2026): se eliminó aquí
+# ``_build_contrato_pdf_storage`` y todos los imports/clases asociadas
+# (SharePointContratoPdfStorage, SigridApiContratoClient,
+# ContratoRefetchService local). El sv4 ya NO descarga ni sube PDFs
+# de contrato — esa responsabilidad la tiene íntegramente el sv3,
+# que lo hace durante el refetch (a través del endpoint
+# /v1/albaranes/{id}/re-fetch-contratos). El sv4 solo conserva la
+# preview del PDF del albarán propio, no del contrato asociado.
 
 
 def build_app(settings: Settings) -> FastAPI:
@@ -182,49 +116,34 @@ def build_app(settings: Settings) -> FastAPI:
     )
 
     # ------------------------------------------------------------------ #
-    # Wiring del servicio de re-fetch manual de contratos desde el portal.
-    # Requiere las credenciales SIGRID_API_* en .env / Settings.
-    # Si faltan, queda None y el endpoint devuelve 503.
+    # Wiring del cliente HTTP al sv3 para el re-fetch manual de
+    # contratos desde el portal.
     #
-    # El SharePointContratoPdfStorage se intenta construir siempre que
-    # haya credenciales de Graph, INDEPENDIENTEMENTE de que haya Sigrid
-    # o no (aunque solo se usa cuando el refetch service está activo).
+    # Antes el sv4 mantenía su propio cliente Sigrid + ContratoRefetchService
+    # + SharePointContratoPdfStorage, duplicando código del sv3 y
+    # pisando los sigrid_ide del UPSERT. Tras el refactor (mayo 2026)
+    # el sv4 delega ÍNTEGRAMENTE en el sv3: hace POST al endpoint
+    # /v1/albaranes/{id}/re-fetch-contratos y reenvía el outcome al
+    # front.
+    #
+    # El cliente HTTP se construye SIEMPRE (no depende de credenciales
+    # — el sv4 no tiene que conocerlas). Si el sv3 está caído o no
+    # tiene Sigrid cableado, el cliente devuelve outcomes con
+    # status=sigrid_error y mensajes útiles; el portal no se rompe.
     # ------------------------------------------------------------------ #
-    contrato_pdf_storage = _build_contrato_pdf_storage(settings)
-
-    contrato_refetch_service: ContratoRefetchService | None = None
-    sigrid_base = getattr(settings, "sigrid_api_base_url", None)
-    sigrid_key = getattr(settings, "sigrid_api_function_key", None)
-    sigrid_db = getattr(settings, "sigrid_api_database", None)
-    sigrid_timeout = getattr(settings, "sigrid_api_timeout_s", 30.0)
-    if sigrid_base and sigrid_key and sigrid_db:
-        sigrid_client = SigridApiContratoClient(
-            base_url=sigrid_base,
-            function_key=sigrid_key,
-            database=sigrid_db,
-            timeout_s=float(sigrid_timeout),
-        )
-        contrato_refetch_service = ContratoRefetchService(
-            client=sigrid_client,
-            repository=repository,
-            pdf_storage=contrato_pdf_storage,
-            enabled=True,
-        )
-        logger.info(
-            "[contrato-refetch][wiring] ContratoRefetchService ACTIVADO "
-            "contra %s db=%s pdf_storage=%s",
-            sigrid_base,
-            sigrid_db,
-            "PRESENTE" if contrato_pdf_storage is not None else "None",
-        )
-    else:
-        logger.warning(
-            "[contrato-refetch][wiring] ContratoRefetchService NO creado: "
-            "faltan SIGRID_API_BASE_URL/FUNCTION_KEY/DATABASE en settings. "
-            "El endpoint POST /api/documents/{id}/re-fetch-contratos devolverá 503."
-        )
-    app.state.contrato_refetch_service = contrato_refetch_service
-    app.state.contrato_pdf_storage = contrato_pdf_storage
+    sv3_refetch_client: ContratoRefetchClient = Sv3RefetchClient(
+        base_url=settings.sv3_base_url,
+        path=settings.sv3_path_refetch_contratos,
+        timeout_s=settings.sv3_timeout_s,
+    )
+    logger.info(
+        "[contrato-refetch][wiring] Sv3RefetchClient CABLEADO base_url=%s "
+        "path=%s timeout=%ss",
+        settings.sv3_base_url,
+        settings.sv3_path_refetch_contratos,
+        settings.sv3_timeout_s,
+    )
+    app.state.sv3_refetch_client = sv3_refetch_client
 
     templates = Jinja2Templates(
         directory=str(Path(__file__).resolve().parents[2] / "templates")
@@ -264,8 +183,7 @@ def build_app(settings: Settings) -> FastAPI:
                 "default_page_size": settings.default_page_size,
                 "max_page_size": settings.max_page_size,
                 "preview_enabled": settings.preview_enabled,
-                "contrato_refetch_wired": contrato_refetch_service is not None,
-                "contrato_pdf_storage_wired": contrato_pdf_storage is not None,
+                "sv3_refetch_client_url": settings.sv3_base_url,
             },
         )
 
@@ -559,32 +477,45 @@ def build_app(settings: Settings) -> FastAPI:
         )
 
     # ------------------------------------------------------------------ #
-    # ENDPOINT NUEVO: re-fetch manual de contratos desde el portal.
-    # Se invoca desde los botones del alert amarillo en la vista de detalle.
-    # Siempre devuelve 200 con 'status' explicativo en cuerpo, excepto:
-    #  - 404: documento no existe
-    #  - 503: servicio Sigrid no configurado en este servicio
+    # Re-fetch manual de contratos desde el portal.
+    #
+    # Delega íntegramente en el sv3 vía HTTP. El sv3 es ahora el
+    # único responsable de hablar con Sigrid y persistir contratos.
+    # El sv4 sigue exponiendo el mismo path para no romper el front.
+    #
+    # Códigos de respuesta:
+    #   * 200 + outcome JSON — el sv3 procesó correctamente la
+    #     petición (con o sin contratos encontrados). El campo
+    #     outcome.status detalla.
+    #   * 404 — el documento no existe en BBDD.
+    #   * 5xx — fallo irrecuperable (raro: el cliente HTTP traduce
+    #     casi todos los fallos a outcomes con status=sigrid_error).
     # ------------------------------------------------------------------ #
     @app.post("/api/documents/{document_id}/re-fetch-contratos")
     def refetch_contratos_api(document_id: str) -> dict:
-        service: ContratoRefetchService | None = app.state.contrato_refetch_service
-        if service is None:
-            raise HTTPException(
-                status_code=503,
-                detail=(
-                    "La búsqueda de contratos no está configurada en este "
-                    "servicio. Revisa SIGRID_API_BASE_URL/FUNCTION_KEY/"
-                    "DATABASE en el .env."
-                ),
-            )
-
+        # Pre-validamos que el documento existe LOCALMENTE para dar
+        # un 404 rápido sin pegarle al sv3 con peticiones inútiles.
         preview = review_service.get_document(document_id)
         if preview is None:
-            raise HTTPException(status_code=404, detail="Documento no encontrado")
+            raise HTTPException(
+                status_code=404,
+                detail="Documento no encontrado",
+            )
 
-        outcome = service.refetch(document_id=document_id)
+        client: ContratoRefetchClient = app.state.sv3_refetch_client
+        try:
+            outcome: ContratoRefetchOutcome = client.refetch(
+                document_id=document_id,
+            )
+        except KeyError as exc:
+            # El sv3 dijo 404 (no debería pasar si la pre-validación
+            # local pasó, pero por si las moscas — race condition con
+            # un delete entre la pre-validación y la llamada).
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
         logger.info(
-            "[contrato-refetch][api] document_id=%s outcome=%s count=%s selected=%s",
+            "[contrato-refetch][api] document_id=%s outcome=%s count=%s "
+            "selected=%s",
             document_id,
             outcome.status,
             outcome.count,
