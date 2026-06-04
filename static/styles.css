@@ -286,6 +286,48 @@ textarea { resize: vertical; }
     border: 1px solid #fca5a5;
 }
 
+/* --------------------------------------------------------------- */
+/* Estilo del mensaje del botón "Valorar ahora" (#valuate-status). */
+/* Inline en la cabecera del panel — más compacto que refetch-status. */
+/* --------------------------------------------------------------- */
+.valuate-status {
+    margin-left: 10px;
+    padding: 6px 10px;
+    border-radius: 6px;
+    font-size: 0.88rem;
+    line-height: 1.3;
+    display: inline-block;
+    vertical-align: middle;
+}
+.valuate-status.valuate-loading {
+    background: #e0f2fe;
+    color: #075985;
+    border: 1px solid #7dd3fc;
+}
+.valuate-status.valuate-ok {
+    background: #dcfce7;
+    color: #166534;
+    border: 1px solid #86efac;
+}
+.valuate-status.valuate-error {
+    background: #fee2e2;
+    color: #991b1b;
+    border: 1px solid #fca5a5;
+}
+
+/* Fila contenedora del botón "Valorar ahora" (bajo el panel de contrato). */
+.valuate-row {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin-top: 14px;
+}
+.valuate-hint {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
 .contrato-card {
     border: 1px solid var(--border);
     border-radius: 12px;
@@ -493,6 +535,40 @@ tr.conciliacion-row > td.conciliacion-cell {
     background: #FAF8F2;
     border-top: 0;
 }
+
+/* Bloque 2 (may 2026): fila de conciliación ALINEADA POR COLUMNAS.
+   Cada celda cae bajo su columna de la línea de arriba, de modo que el
+   precio del contrato de Sigrid queda justo debajo del precio valorado. */
+tr.conciliacion-row > td.concilia-td {
+    background: #FAF8F2;
+    border-top: 0;
+    vertical-align: top;
+    font-size: 12.5px;
+    color: #2C2C2A;
+    padding: 8px 10px;
+}
+tr.conciliacion-row.concilia-assigned > td.concilia-td:first-child {
+    box-shadow: inset 3px 0 0 #5A7A6E;
+}
+tr.conciliacion-row.concilia-derived > td.concilia-td:first-child {
+    box-shadow: inset 3px 0 0 #C68A4A;
+}
+.concilia-td .concilia-val {
+    display: block;
+    font-weight: 500;
+    color: #2C2C2A;
+    overflow-wrap: anywhere;
+}
+.concilia-td .concilia-sub {
+    display: block;
+    margin-left: 0;
+    color: #8A857B;
+    font-size: 11px;
+    line-height: 1.3;
+}
+.concilia-td.concilia-muted { color: #C2BCB0; text-align: right; }
+.concilia-td .concilia-price-ok,
+.concilia-td .concilia-price-warn { display: inline-block; }
 
 .concilia-box {
     padding: 12px 16px 14px 36px;

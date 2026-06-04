@@ -99,6 +99,8 @@
     const addLineBtn = document.getElementById("add-line-btn");
     const saveBtn = document.getElementById("save-btn");
     const approveBtn = document.getElementById("approve-btn");
+    const valuateBtn = document.getElementById("valuate-btn");
+    const valuateStatus = document.getElementById("valuate-status");
     const saveAndRefetchBtn = document.getElementById("save-and-refetch-btn");
     const refetchOnlyBtn = document.getElementById("refetch-only-btn");
     const refetchStatus = document.getElementById("refetch-status");
@@ -381,6 +383,103 @@
 
     if (saveBtn) saveBtn.addEventListener("click", function () { sendSave(false); });
     if (approveBtn) approveBtn.addEventListener("click", function () { sendSave(true); });
+
+    // --------------------------------------------------------------- //
+    // Botón "Valorar ahora" — dispara la valoración (sv7 → sv6 → sv5)
+    // sin necesidad de aprobar ni reabrir el documento.
+    //
+    // El backend solo permite valorar si hay selected_contrato_codigo,
+    // pero por defensa redundante deshabilitamos el botón visualmente
+    // (atributo disabled en el HTML cuando no hay contrato).
+    //
+    // Tras el click:
+    //   - Deshabilita el botón durante la petición.
+    //   - POST /api/documents/{id}/valuate.
+    //   - Muestra un breve mensaje informativo y deja el botón
+    //     habilitado de nuevo (el revisor puede reintentar si quiere).
+    // --------------------------------------------------------------- //
+    function paintValuateStatus(kind, text) {
+        if (!valuateStatus) return;
+        valuateStatus.hidden = false;
+        valuateStatus.className = "valuate-status valuate-" + kind;
+        valuateStatus.textContent = text;
+    }
+
+    async function triggerValuate() {
+        if (!valuateBtn) return;
+
+        // El backend valora contra el contrato GUARDADO en BBDD. Para que
+        // el revisor no tenga que pulsar "Guardar" aparte tras seleccionar
+        // el contrato, este botón hace dos pasos:
+        //   1) Guarda la selección actual (PUT, SIN redirigir).
+        //   2) Dispara la valoración (POST /valuate → sv7 → sv6 → sv5).
+        const codigo = collectSelectedContratoCodigo();
+        if (!codigo) {
+            paintValuateStatus(
+                "error",
+                "Selecciona un contrato antes de valorar."
+            );
+            return;
+        }
+
+        valuateBtn.disabled = true;
+        paintValuateStatus(
+            "loading",
+            "Guardando selección y lanzando valoración…"
+        );
+        try {
+            // Paso 1: persistir la selección (y los campos editados) sin
+            // navegar fuera de la página.
+            const saveResp = await fetch(`/api/documents/${documentId}`, {
+                method: "PUT",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(collectPayload(false)),
+            });
+            if (!saveResp.ok) {
+                let detail = saveResp.statusText;
+                try {
+                    const b = await saveResp.json();
+                    detail = b.detail || detail;
+                } catch (_) {}
+                paintValuateStatus(
+                    "error",
+                    "Error al guardar la selección: " + detail
+                );
+                return;
+            }
+
+            // Paso 2: disparar la valoración.
+            const response = await fetch(
+                `/api/documents/${documentId}/valuate`,
+                { method: "POST", headers: { "Content-Type": "application/json" } }
+            );
+            let body = null;
+            try { body = await response.json(); } catch (_) {}
+            if (!response.ok) {
+                const detail = (body && body.detail) || response.statusText;
+                paintValuateStatus("error", "Error: " + detail);
+                return;
+            }
+            const msg = (body && body.message) ||
+                "Valoración encolada. Refresca en unos segundos.";
+            paintValuateStatus("ok", msg);
+        } catch (exc) {
+            paintValuateStatus("error", "Error de red: " + (exc && exc.message || exc));
+        } finally {
+            // Volvemos a habilitar el botón. El revisor puede pulsar
+            // otra vez si quiere reintentar (cada click genera un
+            // selected_at_utc distinto → sv7 lo trata como una nueva
+            // revaluación legítima).
+            valuateBtn.disabled = false;
+        }
+    }
+
+    if (valuateBtn) {
+        valuateBtn.addEventListener("click", function (event) {
+            event.preventDefault();
+            triggerValuate();
+        });
+    }
 
     // --------------------------------------------------------------- //
     // Re-búsqueda manual de contratos (alert amarillo de "0 contratos")

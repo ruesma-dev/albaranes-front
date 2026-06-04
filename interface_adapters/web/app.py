@@ -4,6 +4,7 @@ from __future__ import annotations
 import html
 import json
 import logging
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlencode
@@ -27,9 +28,11 @@ from domain.models.review_models import (
     normalize_view_mode,
 )
 from domain.ports.contrato_refetch_port import ContratoRefetchClient
+from domain.ports.orchestrator_port import OrchestratorClient
 from infrastructure.database.review_repository import AlbaranReviewRepository
 from infrastructure.database.session_factory import SessionFactory
 from infrastructure.graph.token_provider import GraphTokenProvider
+from infrastructure.http.orchestrator_client import HttpOrchestratorClient
 from infrastructure.http.sv3_refetch_client import Sv3RefetchClient
 
 logger = logging.getLogger(__name__)
@@ -144,6 +147,34 @@ def build_app(settings: Settings) -> FastAPI:
         settings.sv3_timeout_s,
     )
     app.state.sv3_refetch_client = sv3_refetch_client
+
+    # ------------------------------------------------------------------ #
+    # Cliente al orquestador (sv7).
+    #
+    # Antes existía como archivo (infrastructure/http/orchestrator_client.py)
+    # pero NUNCA se instanciaba ni se llamaba — el sv4 jamás notificaba
+    # eventos al sv7 y por tanto la valoración nunca arrancaba desde el
+    # portal. Aquí lo activamos.
+    #
+    # Best-effort: el cliente captura cualquier fallo HTTP/red y lo
+    # loguea sin propagar. La razón es que el dato fundamental
+    # (selected_contrato_codigo, approved=true) YA está persistido en
+    # albaran_documents_merge antes de llamar al sv7. El evento es solo
+    # el "trigger" para que sv7 actúe; si se pierde, no se pierde estado.
+    # ------------------------------------------------------------------ #
+    orchestrator_client: OrchestratorClient = HttpOrchestratorClient(
+        base_url=settings.sv7_base_url,
+        path_contract_selected=settings.sv7_path_contract_selected,
+        path_document_approved=settings.sv7_path_document_approved,
+        timeout_s=settings.sv7_timeout_s,
+    )
+    logger.info(
+        "[orchestrator][wiring] HttpOrchestratorClient CABLEADO base_url=%s "
+        "timeout=%ss",
+        settings.sv7_base_url,
+        settings.sv7_timeout_s,
+    )
+    app.state.orchestrator_client = orchestrator_client
 
     templates = Jinja2Templates(
         directory=str(Path(__file__).resolve().parents[2] / "templates")
@@ -528,6 +559,92 @@ def build_app(settings: Settings) -> FastAPI:
             "message": outcome.message,
             "cif": outcome.cif,
             "obra_codigo": outcome.obra_codigo,
+        }
+
+    # ------------------------------------------------------------------ #
+    # ENDPOINT: Botón "Valorar ahora" del portal.
+    #
+    # Flujo:
+    #   1. El revisor selecciona un contrato (o ya lo tenía seleccionado).
+    #   2. Pulsa "Valorar ahora".
+    #   3. El sv4 emite ContractSelectedEvent al sv7.
+    #   4. El sv7 transita el workflow a VALUING y lanza la valoración
+    #      en background (sv6 → sv5 → genera líneas sintéticas).
+    #   5. El front muestra toast "Valoración encolada" y el revisor
+    #      refresca tras unos segundos.
+    #
+    # Semánticamente equivale a "como si el revisor acabara de elegir
+    # el contrato". El sv7 ya maneja todos los sub-casos:
+    #   - workflow en AWAITING_CONTRACT_SELECTION → transición a VALUING
+    #   - workflow en VALUATION_FAILED → reabrir
+    #   - workflow en AWAITING_APPROVAL o terminal → spawn revaluation
+    #
+    # Best-effort: si sv7 está caído, el endpoint NO falla; loguea y
+    # devuelve 200 con un mensaje informativo. El estado (contrato
+    # seleccionado) ya está persistido en BBDD; cuando sv7 vuelva, el
+    # revisor puede pulsar otra vez.
+    # ------------------------------------------------------------------ #
+    @app.post("/api/documents/{document_id}/valuate")
+    def valuate_document_api(document_id: str) -> dict:
+        # 1) Verificar que el documento existe localmente.
+        preview = review_service.get_document(document_id)
+        if preview is None:
+            raise HTTPException(
+                status_code=404,
+                detail="Documento no encontrado",
+            )
+
+        # 2) Leer el contrato seleccionado directamente de BBDD (no del
+        #    payload, para evitar que el front mande algo distinto).
+        codigo_contrato: str | None = getattr(
+            preview, "selected_contrato_codigo", None,
+        )
+        if not codigo_contrato:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "El documento no tiene contrato seleccionado. "
+                    "Elige un contrato antes de valorar."
+                ),
+            )
+
+        # 3) Componer el evento. El selected_at_utc es el INSTANTE del
+        #    click, no la fecha del save anterior. Esto sirve como
+        #    correlation_key del sv7: dos clicks separados → dos
+        #    revaluations (legítimas); doble-click rápido (mismo
+        #    timestamp ISO al segundo) → idempotente.
+        now_utc = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        client: OrchestratorClient = app.state.orchestrator_client
+        try:
+            client.notify_contract_selected(
+                document_id=document_id,
+                codigo_contrato=codigo_contrato,
+                selected_by=settings.default_reviewer,
+                selected_at_utc=now_utc,
+            )
+        except Exception:
+            # El cliente ya es best-effort; este try es por si en una
+            # versión futura cambia el contrato. NO propagamos: el
+            # usuario pulsó un botón y queremos darle feedback.
+            logger.exception(
+                "[valuate][api] error inesperado notificando sv7 "
+                "document_id=%s codigo=%s",
+                document_id, codigo_contrato,
+            )
+
+        logger.info(
+            "[valuate][api] document_id=%s codigo=%s reviewer=%s notificado a sv7",
+            document_id, codigo_contrato, settings.default_reviewer,
+        )
+        return {
+            "accepted": True,
+            "document_id": document_id,
+            "codigo_contrato": codigo_contrato,
+            "selected_at_utc": now_utc,
+            "message": (
+                "Valoración encolada. Refresca la página en unos "
+                "segundos para ver el resultado."
+            ),
         }
 
     @app.exception_handler(KeyError)
