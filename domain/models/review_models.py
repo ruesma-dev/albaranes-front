@@ -1,7 +1,7 @@
 # domain/models/review_models.py
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -103,6 +103,22 @@ class MergeLinePayload(BaseModel):
     field_scores_json: str | None = None
 
 
+class ProveedorOption(BaseModel):
+    """Opcion de proveedor para el desplegable de cabecera. Lista de
+    proveedores que tienen algun contrato en el proyecto (cif + nombre)."""
+
+    cif: str | None = None
+    nombre: str | None = None
+
+
+class ObraOption(BaseModel):
+    """Opcion de obra para el desplegable de cabecera. Lista de obras que
+    tienen algun contrato en el proyecto (codigo + nombre)."""
+
+    codigo: str | None = None
+    nombre: str | None = None
+
+
 class ContratoPayload(BaseModel):
     id: int
     codigo_contrato: str
@@ -118,6 +134,19 @@ class ContratoPayload(BaseModel):
     nombre_obra: str | None = None
     pdf_sharepoint_relative_path: str | None = None
     pdf_sharepoint_web_url: str | None = None
+
+
+class ContratoLinePayload(BaseModel):
+    """Una linea de albaran_contrato_lines_merge del contrato
+    seleccionado. Se expone al detalle para poblar el desplegable
+    de conciliacion editable (elegir otra linea o derivar nueva)."""
+    id: int
+    codigo_contrato: str
+    codigo_partida: str | None = None
+    descripcion: str | None = None
+    precio_unitario: float | None = None
+    unidad_medida: str | None = None
+    codigo_producto: str | None = None
 
 
 # ====================================================================== #
@@ -140,6 +169,16 @@ class ValuationLineUpdate(BaseModel):
     unidad_contrato: str | None = None
     precio_unitario_final: float | None = None
     importe_calculado: float | None = None
+
+
+class ConciliacionOverridePayload(BaseModel):
+    """Override manual de la conciliacion de UNA linea de valoracion.
+    mode='contract_line' apunta a otra linea del contrato;
+    mode='nueva' deriva una linea nueva en la partida de la linea."""
+    mode: Literal["contract_line", "nueva"]
+    matched_contrato_line_id: int | None = None
+    descripcion: str | None = None
+    precio_unitario: float | None = None
 
 
 class MergeDocumentUpdatePayload(BaseModel):
@@ -400,6 +439,11 @@ class DocumentDetailPayload(BaseModel):
     display_lines: list[DisplayLine] = Field(default_factory=list)
     provider_snapshots: list[ProviderSnapshot] = Field(default_factory=list)
     contratos: list[ContratoPayload] = Field(default_factory=list)
+    contrato_lines: list[ContratoLinePayload] = Field(default_factory=list)
+    # Listas para los desplegables de cabecera: proveedores y obras que
+    # tienen algun contrato en el proyecto (no solo los de este documento).
+    proveedores_disponibles: list[ProveedorOption] = Field(default_factory=list)
+    obras_disponibles: list[ObraOption] = Field(default_factory=list)
     selected_contrato_codigo: str | None = None
     # NUEVO — None mientras no exista valoración en BBDD.
     valuation: ValuationPayload | None = None

@@ -50,6 +50,25 @@ class ReviewService:
             approved_by=approved_by or self._default_reviewer,
         )
 
+    def set_line_conciliacion(
+        self,
+        *,
+        document_id: str,
+        valuation_line_id: int,
+        mode: str,
+        matched_contrato_line_id: int | None = None,
+        descripcion: str | None = None,
+        precio_unitario: float | None = None,
+    ) -> bool:
+        return self._repository.set_line_conciliacion(
+            document_id=document_id,
+            valuation_line_id=valuation_line_id,
+            mode=mode,
+            matched_contrato_line_id=matched_contrato_line_id,
+            descripcion=descripcion,
+            precio_unitario=precio_unitario,
+        )
+
     def unapprove_document(self, *, document_id: str) -> None:
         self._repository.set_approved(
             document_id=document_id,

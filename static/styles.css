@@ -389,6 +389,8 @@ textarea { resize: vertical; }
 
 .contrato-multi { display: flex; flex-direction: column; gap: 12px; }
 .contrato-select { background: white; cursor: pointer; }
+/* Desplegables de cabecera (elegir proveedor / obra con contrato). */
+.header-select { width: 100%; background: white; cursor: pointer; }
 
 .contrato-scroll::-webkit-scrollbar { height: 8px; }
 .contrato-scroll::-webkit-scrollbar-track { background: #eef2ff; border-radius: 4px; }
@@ -757,4 +759,27 @@ tr.conciliacion-row.concilia-derived > td.concilia-td:first-child {
 }
 .split-layout.pdf-collapsed {
     grid-template-columns: 1fr !important;
+}
+
+
+/* ---- Conciliacion editable ---- */
+button.concilia-badge.js-concilia-edit {
+    cursor: pointer;
+    border: none;
+    font: inherit;
+    line-height: 1;
+}
+button.concilia-badge.js-concilia-edit:hover {
+    filter: brightness(0.95);
+}
+.concilia-select {
+    display: block;
+    margin-top: 6px;
+    max-width: 360px;
+    width: 100%;
+    font-size: 0.85em;
+    padding: 3px 6px;
+    border: 1px solid #cbd5e1;
+    border-radius: 6px;
+    background: #fff;
 }

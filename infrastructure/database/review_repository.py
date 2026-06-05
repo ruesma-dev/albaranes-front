@@ -11,6 +11,7 @@ from sqlalchemy import delete, func, inspect, nullslast, or_, select, text
 from domain.models.review_models import (
     ConciliacionDisplay,
     ConciliacionSibling,
+    ContratoLinePayload,
     ContratoPayload,
     DisplayLine,
     DocumentDetailPayload,
@@ -20,7 +21,9 @@ from domain.models.review_models import (
     LineValuationPayload,
     MergeDocumentUpdatePayload,
     MergeLinePayload,
+    ObraOption,
     PaginatedDocuments,
+    ProveedorOption,
     ProviderSnapshot,
     ValuationLineUpdate,
     ValuationPayload,
@@ -288,9 +291,54 @@ class AlbaranReviewRepository:
                     .order_by(AlbaranContratoMergeOrm.codigo_contrato.asc())
                 ).all()
 
-            contratos_payload = [
+            # Dedup por codigo_contrato (#1): Sigrid puede tener el mismo
+            # contrato con varios ``sigrid_ide`` (se recrea al modificarlo),
+            # lo que deja filas duplicadas en ``albaran_contratos_merge``
+            # para el mismo documento. El panel y el desplegable deben
+            # mostrar UNO por codigo. Conservamos la primera aparicion.
+            _contratos_all = [
                 self._contrato_orm_to_payload(item) for item in contratos_orm
             ]
+            _seen_cod: set[str] = set()
+            contratos_payload = []
+            for _cp in _contratos_all:
+                if _cp.codigo_contrato in _seen_cod:
+                    continue
+                _seen_cod.add(_cp.codigo_contrato)
+                contratos_payload.append(_cp)
+
+            # Lineas del contrato seleccionado, para el desplegable de
+            # conciliacion editable del front (elegir otra linea o nueva).
+            _lines_raw = [
+                ContratoLinePayload(
+                    id=int(r["id"]),
+                    codigo_contrato=r.get("codigo_contrato") or "",
+                    codigo_partida=r.get("codigo_partida"),
+                    descripcion=r.get("descripcion_linea"),
+                    precio_unitario=r.get("precio_unitario"),
+                    unidad_medida=r.get("unidad_medida"),
+                    codigo_producto=r.get("codigo_producto"),
+                )
+                for r in self._fetch_contrato_lines_for_codigo_in_session(
+                    session, selected_contrato_codigo
+                )
+            ]
+            # Dedup de opciones identicas (misma partida+descripcion+precio+
+            # unidad): si habia contratos duplicados con sus lineas repetidas,
+            # el desplegable no debe mostrar la misma opcion dos veces.
+            _seen_ln: set[tuple] = set()
+            contrato_lines_payload = []
+            for _ln in _lines_raw:
+                _key = (
+                    _ln.codigo_partida,
+                    _ln.descripcion,
+                    _ln.precio_unitario,
+                    _ln.unidad_medida,
+                )
+                if _key in _seen_ln:
+                    continue
+                _seen_ln.add(_key)
+                contrato_lines_payload.append(_ln)
 
             provider_docs = session.scalars(
                 select(AlbaranDocumentBaseOrm)
@@ -328,6 +376,13 @@ class AlbaranReviewRepository:
                 for item in provider_docs
             ]
 
+            # Los desplegables de cabecera (proveedor / obra) ya NO se
+            # rellenan desde la BBDD local (solo tenia los contratos ya
+            # ingeridos). Ahora el front los pide BAJO DEMANDA a Sigrid via
+            # los endpoints /api/sigrid/* (ver app.py). Dejamos las listas
+            # vacias aqui.
+            proveedores_opts, obras_opts = [], []
+
             # NUEVO: leer valoración (si existe) en la misma sesión.
             valuation_payload = self._load_valuation_in_session(
                 session=session,
@@ -353,6 +408,9 @@ class AlbaranReviewRepository:
                     available_views=available_views,
                     provider_snapshots=provider_snapshots_payload,
                     contratos=contratos_payload,
+                    contrato_lines=contrato_lines_payload,
+                    proveedores=proveedores_opts,
+                    obras=obras_opts,
                     selected_contrato_codigo=selected_contrato_codigo,
                     valuation=valuation_payload,
                     conciliation_by_valuation_line_id=conciliation_by_valuation_line_id,
@@ -368,6 +426,9 @@ class AlbaranReviewRepository:
                     available_views=available_views,
                     provider_snapshots=provider_snapshots_payload,
                     contratos=contratos_payload,
+                    contrato_lines=contrato_lines_payload,
+                    proveedores=proveedores_opts,
+                    obras=obras_opts,
                     selected_contrato_codigo=selected_contrato_codigo,
                     valuation=valuation_payload,
                     conciliation_by_valuation_line_id=conciliation_by_valuation_line_id,
@@ -390,6 +451,58 @@ class AlbaranReviewRepository:
                 selected_contrato_codigo=selected_contrato_codigo,
                 valuation=valuation_payload,
             )
+
+    # ------------------------------------------------------------------ #
+    # NUEVO: opciones de cabecera (proveedores / obras del proyecto) para
+    # los desplegables. DISTINCT sobre TODA la tabla de contratos, dedup
+    # por cif (proveedor) y por codigo (obra). Tolerante a tabla ausente.
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def _load_header_options_in_session(
+        session: Any,
+    ) -> tuple[list[ProveedorOption], list[ObraOption]]:
+        proveedores: list[ProveedorOption] = []
+        obras: list[ObraOption] = []
+        try:
+            prov_rows = session.execute(
+                text(
+                    "SELECT DISTINCT cif_proveedor, nombre_proveedor "
+                    "FROM albaran_contratos_merge "
+                    "WHERE cif_proveedor IS NOT NULL AND cif_proveedor <> '' "
+                    "ORDER BY nombre_proveedor"
+                )
+            ).mappings().all()
+            obra_rows = session.execute(
+                text(
+                    "SELECT DISTINCT codigo_obra, nombre_obra "
+                    "FROM albaran_contratos_merge "
+                    "WHERE codigo_obra IS NOT NULL AND codigo_obra <> '' "
+                    "ORDER BY codigo_obra"
+                )
+            ).mappings().all()
+        except Exception:
+            session.rollback()
+            return [], []
+
+        _seen_cif: set[str] = set()
+        for r in prov_rows:
+            cif = (r["cif_proveedor"] or "").strip()
+            if not cif or cif in _seen_cif:
+                continue
+            _seen_cif.add(cif)
+            nombre = (r["nombre_proveedor"] or "").strip() or None
+            proveedores.append(ProveedorOption(cif=cif, nombre=nombre))
+
+        _seen_cod: set[str] = set()
+        for r in obra_rows:
+            cod = (r["codigo_obra"] or "").strip()
+            if not cod or cod in _seen_cod:
+                continue
+            _seen_cod.add(cod)
+            nombre = (r["nombre_obra"] or "").strip() or None
+            obras.append(ObraOption(codigo=cod, nombre=nombre))
+
+        return proveedores, obras
 
     # ------------------------------------------------------------------ #
     # NUEVO: lectura de valoración desde las tablas del servicio 6.
@@ -780,6 +893,184 @@ class AlbaranReviewRepository:
         tol = max(0.01, 0.01 * max(abs(a), abs(b)))
         return "agree" if abs(a - b) <= tol else "disagree"
 
+    @staticmethod
+    def _fetch_contrato_lines_for_codigo_in_session(
+        session: Any, codigo_contrato: str | None
+    ):
+        """Todas las lineas de albaran_contrato_lines_merge de un contrato,
+        para poblar el desplegable de conciliacion editable. Tolerante a
+        que la tabla no exista (BBDD antigua)."""
+        if not codigo_contrato:
+            return []
+        sql = (
+            "SELECT id, codigo_contrato, codigo_partida, descripcion_linea, "
+            "       precio_unitario, unidad_medida, codigo_producto "
+            "FROM albaran_contrato_lines_merge "
+            "WHERE codigo_contrato = :cod "
+            "ORDER BY codigo_partida NULLS LAST, descripcion_linea"
+        )
+        try:
+            return session.execute(
+                text(sql), {"cod": codigo_contrato}
+            ).mappings().all()
+        except Exception:
+            session.rollback()
+            return []
+
+    def set_line_conciliacion(
+        self,
+        *,
+        document_id: str,
+        valuation_line_id: int,
+        mode: str,
+        matched_contrato_line_id: int | None = None,
+        descripcion: str | None = None,
+        precio_unitario: float | None = None,
+    ) -> bool:
+        """Override manual de la conciliacion de UNA linea de valoracion.
+
+        mode='contract_line': apunta la linea a matched_contrato_line_id
+          (linea de albaran_contrato_lines_merge), trae su precio y
+          recalcula el importe. Limpia la derivada previa.
+        mode='nueva': crea una linea en contrato_lines_derived en la
+          partida de la linea (descripcion/precio por defecto los de la
+          propia linea), la enlaza y recalcula el importe. Limpia el match.
+
+        NO revalora: solo toca esta linea y el total de la cabecera. La
+        correccion se pierde si luego se pulsa "Valorar ahora" (reemplazo
+        completo). Devuelve True si actualizo algo.
+        """
+        self.initialize()
+        with self._session_factory.create_session() as session:
+            row = session.execute(
+                text(
+                    "SELECT lv.id, lv.valuation_id, lv.cantidad_albaran, "
+                    "       lv.cantidad_convertida, lv.codigo_partida_final, "
+                    "       lv.descripcion_linea, lv.precio_unitario_final, "
+                    "       v.document_id, v.contrato_codigo "
+                    "FROM albaran_line_valuations lv "
+                    "JOIN albaran_valuations v ON v.id = lv.valuation_id "
+                    "WHERE lv.id = :vid"
+                ),
+                {"vid": valuation_line_id},
+            ).mappings().first()
+            if row is None or row["document_id"] != document_id:
+                return False
+
+            valuation_id = row["valuation_id"]
+            cantidad = (
+                row["cantidad_convertida"]
+                if row["cantidad_convertida"] is not None
+                else row["cantidad_albaran"]
+            )
+
+            def _importe(precio):
+                if precio is None or cantidad is None:
+                    return None
+                return round(float(precio) * float(cantidad), 2)
+
+            if mode == "contract_line":
+                if matched_contrato_line_id is None:
+                    return False
+                cl = session.execute(
+                    text(
+                        "SELECT precio_unitario "
+                        "FROM albaran_contrato_lines_merge WHERE id = :id"
+                    ),
+                    {"id": matched_contrato_line_id},
+                ).mappings().first()
+                if cl is None:
+                    return False
+                precio = (
+                    precio_unitario
+                    if precio_unitario is not None
+                    else cl["precio_unitario"]
+                )
+                session.execute(
+                    text(
+                        "UPDATE albaran_line_valuations SET "
+                        "  matched_contrato_line_id = :mid, "
+                        "  derived_contrato_line_id = NULL, "
+                        "  precio_unitario_final = :pu, "
+                        "  precio_unitario_source = 'manual_contract', "
+                        "  precio_unitario_agreement = 'manual', "
+                        "  importe_calculado = :imp, "
+                        "  importe_source = 'calculated', "
+                        "  review_required = FALSE "
+                        "WHERE id = :vid"
+                    ),
+                    {
+                        "mid": matched_contrato_line_id,
+                        "pu": precio,
+                        "imp": _importe(precio),
+                        "vid": valuation_line_id,
+                    },
+                )
+            elif mode == "nueva":
+                precio = (
+                    precio_unitario
+                    if precio_unitario is not None
+                    else row["precio_unitario_final"]
+                )
+                desc = descripcion or row["descripcion_linea"]
+                new_id = session.execute(
+                    text(
+                        "INSERT INTO contrato_lines_derived ("
+                        "  created_by_valuation_id, source_document_id, "
+                        "  codigo_contrato, codigo_producto, descripcion_linea, "
+                        "  unidad_medida, precio_unitario, codigo_partida, "
+                        "  origen, created_at_utc) "
+                        "VALUES (:vid, :doc, :cod, NULL, :desc, NULL, :pu, "
+                        "  :part, 'manual_override', :now) "
+                        "RETURNING id"
+                    ),
+                    {
+                        "vid": valuation_id,
+                        "doc": document_id,
+                        "cod": row["contrato_codigo"] or "",
+                        "desc": desc,
+                        "pu": precio,
+                        "part": row["codigo_partida_final"],
+                        "now": self._utc_iso(),
+                    },
+                ).scalar_one()
+                session.execute(
+                    text(
+                        "UPDATE albaran_line_valuations SET "
+                        "  matched_contrato_line_id = NULL, "
+                        "  derived_contrato_line_id = :did, "
+                        "  precio_unitario_final = :pu, "
+                        "  precio_unitario_source = 'manual_derived', "
+                        "  precio_unitario_agreement = 'manual', "
+                        "  importe_calculado = :imp, "
+                        "  importe_source = 'calculated', "
+                        "  review_required = FALSE "
+                        "WHERE id = :vid"
+                    ),
+                    {
+                        "did": new_id,
+                        "pu": precio,
+                        "imp": _importe(precio),
+                        "vid": valuation_line_id,
+                    },
+                )
+            else:
+                return False
+
+            # Recalcular total de la cabecera.
+            session.execute(
+                text(
+                    "UPDATE albaran_valuations SET "
+                    "  total_valorado = COALESCE((SELECT SUM(importe_calculado) "
+                    "    FROM albaran_line_valuations WHERE valuation_id = :vid), 0), "
+                    "  updated_at_utc = :now "
+                    "WHERE id = :vid"
+                ),
+                {"vid": valuation_id, "now": self._utc_iso()},
+            )
+            session.commit()
+            return True
+
     def _build_merge_detail(
         self,
         *,
@@ -790,6 +1081,9 @@ class AlbaranReviewRepository:
         selected_contrato_codigo: str | None,
         valuation: ValuationPayload | None = None,
         conciliation_by_valuation_line_id: dict[int, ConciliacionDisplay] | None = None,
+        contrato_lines: list[ContratoLinePayload] | None = None,
+        proveedores: list[ProveedorOption] | None = None,
+        obras: list[ObraOption] | None = None,
     ) -> DocumentDetailPayload:
         merge_lines_payload = [
             self._merge_line_to_payload(line) for line in merge_doc.lines
@@ -835,6 +1129,9 @@ class AlbaranReviewRepository:
             display_lines=display_lines,
             provider_snapshots=provider_snapshots,
             contratos=contratos,
+            contrato_lines=contrato_lines or [],
+            proveedores_disponibles=proveedores or [],
+            obras_disponibles=obras or [],
             selected_contrato_codigo=selected_contrato_codigo,
             valuation=valuation,
         )
@@ -1270,7 +1567,6 @@ class AlbaranReviewRepository:
                     "FROM albaran_line_valuations lv "
                     "JOIN albaran_valuations v ON v.id = lv.valuation_id "
                     "WHERE v.document_id = :doc_id "
-                    "  AND lv.line_kind = 'synthetic_modifier' "
                     "  AND lv.id = ANY(:ids)"
                 ),
                 {"doc_id": document_id, "ids": requested_ids},
@@ -1337,7 +1633,7 @@ class AlbaranReviewRepository:
             # parámetro"). Pasándolas ya resueltas evitamos el problema y
             # queda más claro.
             precio_source_val = (
-                "pdf_inference"
+                "manual"
                 if upd.precio_unitario_final is not None
                 else "none"
             )
@@ -1348,18 +1644,17 @@ class AlbaranReviewRepository:
             session.execute(
                 text(
                     "UPDATE albaran_line_valuations SET "
-                    "    codigo_partida_final = :codpart, "
-                    "    descripcion_linea = :desc, "
+                    "    codigo_partida_final = COALESCE(:codpart, codigo_partida_final), "
+                    "    descripcion_linea = COALESCE(:desc, descripcion_linea), "
                     "    cantidad_albaran = :ca, "
                     "    cantidad_convertida = :cc, "
                     "    factor_conversion = :fc, "
-                    "    unidad_contrato = :uc, "
+                    "    unidad_contrato = COALESCE(:uc, unidad_contrato), "
                     "    precio_unitario_final = :pu, "
                     "    precio_unitario_source = :pu_src, "
                     "    importe_calculado = :imp, "
                     "    importe_source = :imp_src "
-                    "WHERE id = :lv_id "
-                    "  AND line_kind = 'synthetic_modifier'"
+                    "WHERE id = :lv_id"
                 ),
                 {
                     "codpart": self._clean_text(upd.codigo_partida_final),

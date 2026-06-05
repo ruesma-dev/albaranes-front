@@ -97,6 +97,7 @@
         })();
 
     const addLineBtn = document.getElementById("add-line-btn");
+    const undoBtn = document.getElementById("undo-btn");
     const saveBtn = document.getElementById("save-btn");
     const approveBtn = document.getElementById("approve-btn");
     const valuateBtn = document.getElementById("valuate-btn");
@@ -212,15 +213,341 @@
             if (tr) {
                 tr.remove();
                 reindexRows();
+                if (typeof pushUndoAction === "function") pushUndoAction();
             }
+        }
+    });
+
+    // --------------------------------------------------------------- //
+    // Conciliacion editable.
+    //
+    // El badge Sigrid/Nueva de la fila de conciliacion es un boton que
+    // revela un <select> con las lineas del contrato (+ opcion "Nueva").
+    // Al elegir una opcion se hace PATCH al endpoint de override y se
+    // recarga la pagina para reflejar precio/importe/badge actualizados.
+    // (La correccion vive hasta el proximo "Valorar ahora").
+    // --------------------------------------------------------------- //
+    linesBody.addEventListener("click", function (evt) {
+        const btn = evt.target.closest
+            ? evt.target.closest(".js-concilia-edit")
+            : null;
+        if (!btn) return;
+        const row = btn.closest("tr.conciliacion-row");
+        if (!row) return;
+        const sel = row.querySelector(".js-concilia-select");
+        if (!sel) return;
+        sel.hidden = !sel.hidden;
+        if (!sel.hidden) sel.focus();
+    });
+
+    linesBody.addEventListener("change", async function (evt) {
+        const sel = evt.target.closest
+            ? evt.target.closest(".js-concilia-select")
+            : null;
+        if (!sel) return;
+        const vid = sel.dataset.vid;
+        const value = sel.value;
+        if (!vid || !value) return;
+        const body = (value === "nueva")
+            ? { mode: "nueva" }
+            : { mode: "contract_line", matched_contrato_line_id: Number(value) };
+        sel.disabled = true;
+        try {
+            const resp = await fetch(
+                `/api/documents/${documentId}/lines/${vid}/conciliacion`,
+                {
+                    method: "PATCH",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(body),
+                }
+            );
+            if (!resp.ok) {
+                let msg = "No se pudo aplicar la conciliacion.";
+                try {
+                    const j = await resp.json();
+                    if (j && j.detail) msg = j.detail;
+                } catch (e) { /* sin cuerpo JSON */ }
+                window.alert(msg);
+                sel.disabled = false;
+                return;
+            }
+            window.location.reload();
+        } catch (e) {
+            window.alert("Error de red aplicando la conciliacion.");
+            sel.disabled = false;
         }
     });
 
     if (addLineBtn) {
         addLineBtn.addEventListener("click", function () {
             const row = buildEmptyRow(linesBody.querySelectorAll("tr").length);
+            row.dataset.added = "1";
             linesBody.appendChild(row);
             reindexRows();
+            pushUndoAction();
+        });
+    }
+
+    // --------------------------------------------------------------- //
+    // Edicion de lineas (#4/#5/#6): unidad y unitario editables,
+    // recalculo importe<->unitario, dirty-tracking y deshacer.
+    //
+    //   - cantidad o unitario cambian -> importe = cantidad * unitario.
+    //   - importe cambia            -> unitario = importe / cantidad.
+    //   - Toda edicion marca la fila "dirty". Solo las filas dirty con
+    //     valuation_line_id envian valuation_line_update al guardar (asi
+    //     no se corrompen conversiones de lineas no tocadas).
+    //   - "Deshacer" restaura los valores tal cual se cargo la pagina y
+    //     elimina las filas nuevas no guardadas.
+    // --------------------------------------------------------------- //
+    function _rowField(row, field) {
+        return row.querySelector('[data-field="' + field + '"]');
+    }
+    function _num(el) {
+        if (!el) return null;
+        const v = (el.value || "").trim();
+        if (!v) return null;
+        const n = Number(v);
+        return Number.isFinite(n) ? n : null;
+    }
+    function _round2(n) { return Math.round(n * 100) / 100; }
+    function _markDirty(row) {
+        if (!row || (row.classList && row.classList.contains("conciliacion-row"))) return;
+        row.dataset.dirty = "1";
+        if (undoBtn) undoBtn.hidden = false;
+    }
+
+    // Recalculo + dirty al teclear (no es una "accion" de undo todavia;
+    // la accion se registra al CONFIRMAR el campo, evento change).
+    linesBody.addEventListener("input", function (evt) {
+        const el = evt.target;
+        if (!el || !el.dataset || !el.dataset.field) return;
+        const row = el.closest("tr");
+        if (!row || (row.classList && row.classList.contains("conciliacion-row"))) return;
+        _markDirty(row);
+
+        const field = el.dataset.field;
+        const cantEl = _rowField(row, "cantidad");
+        const puEl = _rowField(row, "precio_unitario");
+        const impEl = _rowField(row, "importe");
+
+        if (field === "cantidad" || field === "precio_unitario") {
+            const c = _num(cantEl), pu = _num(puEl);
+            if (impEl && c !== null && pu !== null) impEl.value = String(_round2(c * pu));
+        } else if (field === "importe") {
+            const c = _num(cantEl), imp = _num(impEl);
+            if (puEl && c !== null && c !== 0 && imp !== null) puEl.value = String(_round2(imp / c));
+        }
+    });
+
+    // --------------------------------------------------------------- //
+    // PILA DE DESHACER (#6): deshace la ULTIMA accion, con suelo en lo
+    // ultimo guardado. Cada guardado navega a redirect_url (recarga), asi
+    // que la pila arranca vacia en cada carga = ultimo guardado. Una
+    // "accion" es: confirmar la edicion de un campo (change), añadir linea
+    // o eliminar linea. Capturamos el estado serializando el <tbody>; las
+    // escuchas estan DELEGADAS en linesBody, asi que reemplazar innerHTML
+    // no las pierde.
+    // --------------------------------------------------------------- //
+    function _syncDomForSnapshot() {
+        linesBody.querySelectorAll("input").forEach(function (el) {
+            if (el.type === "checkbox" || el.type === "radio") {
+                if (el.checked) el.setAttribute("checked", "checked");
+                else el.removeAttribute("checked");
+            } else {
+                el.setAttribute("value", el.value);
+            }
+        });
+        linesBody.querySelectorAll("textarea").forEach(function (el) {
+            el.textContent = el.value;
+        });
+        linesBody.querySelectorAll("select").forEach(function (sel) {
+            Array.prototype.forEach.call(sel.options, function (opt) {
+                if (opt.selected) opt.setAttribute("selected", "selected");
+                else opt.removeAttribute("selected");
+            });
+        });
+    }
+    function _captureState() {
+        _syncDomForSnapshot();
+        return linesBody.innerHTML;
+    }
+    let _undoStack = [];
+    let _lastState = _captureState();   // baseline = ultimo guardado
+    function _refreshUndoBtn() {
+        if (undoBtn) undoBtn.hidden = (_undoStack.length === 0);
+    }
+    // Registra una accion: empuja el estado PREVIO y fija el actual.
+    function pushUndoAction() {
+        _undoStack.push(_lastState);
+        _lastState = _captureState();
+        _refreshUndoBtn();
+    }
+    function _doUndo() {
+        if (_undoStack.length === 0) return;
+        const prev = _undoStack.pop();
+        linesBody.innerHTML = prev;     // listeners delegados -> sobreviven
+        _lastState = prev;
+        reindexRows();
+        _refreshUndoBtn();
+    }
+
+    // Confirmar la edicion de un campo (blur/Enter) = una accion.
+    linesBody.addEventListener("change", function (evt) {
+        const el = evt.target;
+        if (!el || !el.dataset || !el.dataset.field) return;
+        const row = el.closest("tr");
+        if (!row || (row.classList && row.classList.contains("conciliacion-row"))) return;
+        pushUndoAction();
+    });
+
+    if (undoBtn) {
+        undoBtn.addEventListener("click", _doUndo);
+    }
+
+    // --------------------------------------------------------------- //
+    // Desplegables de cabecera: al elegir un proveedor o una obra de la
+    // lista (proveedores/obras con contrato en el proyecto) rellenamos los
+    // inputs existentes (que son los que se guardan por id). "Escribir
+    // manualmente" (value vacio) no toca nada.
+    // --------------------------------------------------------------- //
+    function _setVal(id, value) {
+        const el = document.getElementById(id);
+        if (el) el.value = value;
+    }
+    function _labelFor(kind, val, nombre) {
+        if (kind === "obra") {
+            return (val || "s/codigo") + (nombre ? " — " + nombre : "");
+        }
+        return (nombre || "Sin nombre") + (val ? " — " + val : "");
+    }
+    function _selectedNombre(select) {
+        const opt = (select.selectedIndex >= 0) ? select.options[select.selectedIndex] : null;
+        return opt ? (opt.getAttribute("data-nombre") || "") : "";
+    }
+    // Reconstruye opciones: [actual (preseleccionada)] + items + manual + [error].
+    function _rebuildOptions(select, items, opts) {
+        opts = opts || {};
+        const kind = select.dataset.kind;
+        const current = (opts.current != null) ? opts.current : select.value;
+        const currentNombre = opts.currentNombre || "";
+        const hasCurrent = !!(current && current.length);
+        select.innerHTML = "";
+        const frag = document.createDocumentFragment();
+        if (hasCurrent) {
+            const o = document.createElement("option");
+            o.value = current;
+            o.setAttribute("data-nombre", currentNombre);
+            o.textContent = _labelFor(kind, current, currentNombre) + " (actual)";
+            o.selected = true;
+            frag.appendChild(o);
+        }
+        (items || []).forEach(function (it) {
+            const val = (kind === "obra") ? (it.codigo || "") : (it.cif || "");
+            const nombre = it.nombre || "";
+            if (hasCurrent && val === current) return;
+            const o = document.createElement("option");
+            o.value = val;
+            o.setAttribute("data-nombre", nombre);
+            o.textContent = _labelFor(kind, val, nombre);
+            frag.appendChild(o);
+        });
+        const man = document.createElement("option");
+        man.value = "";
+        man.textContent = "— escribir manualmente —";
+        frag.appendChild(man);
+        if (opts.error) {
+            const e = document.createElement("option");
+            e.value = ""; e.disabled = true;
+            e.textContent = "⚠ " + opts.error;
+            frag.appendChild(e);
+        } else if (opts.empty) {
+            const e = document.createElement("option");
+            e.value = ""; e.disabled = true;
+            e.textContent = "(sin resultados en Sigrid)";
+            frag.appendChild(e);
+        }
+        select.appendChild(frag);
+        select.value = hasCurrent ? current : "";
+    }
+    function _showLoading(select) {
+        const current = select.value;
+        const currentNombre = _selectedNombre(select);
+        select.innerHTML = "";
+        if (current) {
+            const o = document.createElement("option");
+            o.value = current; o.setAttribute("data-nombre", currentNombre);
+            o.textContent = _labelFor(select.dataset.kind, current, currentNombre) + " (actual)";
+            o.selected = true; select.appendChild(o);
+        }
+        const l = document.createElement("option");
+        l.value = current || ""; l.disabled = true;
+        l.textContent = "Cargando de Sigrid…";
+        select.appendChild(l);
+        select.value = current || "";
+        return { current: current, currentNombre: currentNombre };
+    }
+    // Carga BAJO DEMANDA al enfocar el desplegable. Para proveedores
+    // depende de la obra actual: si cambia, vuelve a consultar.
+    async function _loadSigridOptions(select) {
+        const endpoint = select.dataset.endpoint;
+        if (!endpoint) return;
+        let url = endpoint;
+        let obraVal = "";
+        if (select.dataset.obraInput) {
+            const obraEl = document.getElementById(select.dataset.obraInput);
+            obraVal = obraEl ? (obraEl.value || "").trim() : "";
+            url = endpoint + "?obra=" + encodeURIComponent(obraVal);
+        }
+        const loadKey = obraVal || "_";
+        if (select.dataset.loaded === "loading") return;
+        if (select.dataset.loaded === "1" && select.dataset.loadedKey === loadKey) return;
+
+        select.dataset.loaded = "loading";
+        const snap = _showLoading(select);
+        try {
+            const resp = await fetch(url, { headers: { "Accept": "application/json" } });
+            const data = await resp.json();
+            if (!data || !data.ok) {
+                _rebuildOptions(select, [], {
+                    current: snap.current, currentNombre: snap.currentNombre,
+                    error: (data && data.error) || "Sigrid no disponible",
+                });
+                select.dataset.loaded = "";   // permitir reintento
+                return;
+            }
+            const items = data.items || [];
+            _rebuildOptions(select, items, {
+                current: snap.current, currentNombre: snap.currentNombre,
+                empty: items.length === 0,
+            });
+            select.dataset.loaded = "1";
+            select.dataset.loadedKey = loadKey;
+        } catch (e) {
+            _rebuildOptions(select, [], {
+                current: snap.current, currentNombre: snap.currentNombre,
+                error: "Error de red consultando Sigrid",
+            });
+            select.dataset.loaded = "";
+        }
+    }
+
+    const proveedorSelect = document.getElementById("proveedor_select");
+    if (proveedorSelect) {
+        proveedorSelect.addEventListener("focus", function () { _loadSigridOptions(this); });
+        proveedorSelect.addEventListener("change", function () {
+            if (!this.value) return;   // "escribir manualmente" no toca nada
+            _setVal("proveedor_cif", this.value);
+            _setVal("proveedor_nombre", _selectedNombre(this));
+        });
+    }
+    const obraSelect = document.getElementById("obra_select");
+    if (obraSelect) {
+        obraSelect.addEventListener("focus", function () { _loadSigridOptions(this); });
+        obraSelect.addEventListener("change", function () {
+            if (!this.value) return;
+            _setVal("obra_codigo", this.value);
+            _setVal("obra_nombre", _selectedNombre(this));
         });
     }
 
@@ -272,6 +599,14 @@
         let merge_index = 0;
 
         rows.forEach(function (row) {
+            // Las filas de conciliacion (NUEVA/SIGRID) NO son lineas
+            // editables: no tienen data-line-kind ni inputs data-field.
+            // No deben recolectarse; antes se enviaban como lineas vacias
+            // y el backend las insertaba como blancos en cada guardado (#2).
+            if (row.classList && row.classList.contains("conciliacion-row")) {
+                return;
+            }
+
             const byField = {};
             row.querySelectorAll("[data-field]").forEach(function (el) {
                 byField[el.dataset.field] = el;
@@ -299,20 +634,60 @@
             }
 
             // from_albaran (o fila nueva añadida por el usuario).
+            const _idRaw = row.dataset.lineId ? Number(row.dataset.lineId) : null;
+            const _codimp = readTextOrNull(byField.codigo_imputacion);
+            const _concepto = readTextOrNull(byField.concepto);
+            const _cantidad = readNumericOrNull(byField.cantidad);
+            const _precio = readNumericOrNull(byField.precio);
+            const _descuento = readNumericOrNull(byField.descuento);
+            const _importe = readNumericOrNull(byField.importe);
+            const _codigo = readTextOrNull(byField.codigo);
+
+            // Saltar filas VACIAS (#2): una linea recien añadida y no
+            // rellenada, o una que quedo en blanco, no debe enviarse. Si no
+            // tiene id, simplemente no se inserta. Si tiene id pero esta
+            // totalmente vacia, al no enviarla el backend la elimina, lo que
+            // limpia los blancos acumulados de guardados anteriores.
+            const _isEmpty = (
+                !_codimp && !_concepto && _cantidad === null &&
+                _precio === null && _descuento === null &&
+                _importe === null && !_codigo
+            );
+            if (_isEmpty) {
+                return;
+            }
+
             merge_index += 1;
             merge_lines.push({
-                id: row.dataset.lineId ? Number(row.dataset.lineId) : null,
+                id: _idRaw,
                 line_index: merge_index,
-                codigo_imputacion: readTextOrNull(byField.codigo_imputacion),
-                concepto: readTextOrNull(byField.concepto),
-                cantidad: readNumericOrNull(byField.cantidad),
-                precio: readNumericOrNull(byField.precio),
-                descuento: readNumericOrNull(byField.descuento),
+                codigo_imputacion: _codimp,
+                concepto: _concepto,
+                cantidad: _cantidad,
+                precio: _precio,
+                descuento: _descuento,
                 // 'importe' en V3 == 'precio_neto' en el schema del backend.
-                precio_neto: readNumericOrNull(byField.importe),
-                codigo: readTextOrNull(byField.codigo),
+                precio_neto: _importe,
+                codigo: _codigo,
                 // 'unidad_display' y 'precio_unitario_display' NO se envían.
             });
+
+            // Si una linea BASE se edito (dirty) y tiene valoracion, ademas
+            // del merge enviamos un valuation_line_update para que la
+            // valoracion (albaran_line_valuations) refleje cantidad/unidad/
+            // unitario/importe. Solo si dirty -> no toca lineas intactas.
+            const _vlid = row.dataset.valuationLineId;
+            if (row.dataset.dirty === "1" && _vlid) {
+                valuation_updates.push({
+                    valuation_line_id: Number(_vlid),
+                    codigo_partida_final: _codimp,
+                    descripcion_linea: null,   // preservar (COALESCE en backend)
+                    cantidad_albaran: _cantidad,
+                    unidad_contrato: readTextOrNull(byField.unidad),
+                    precio_unitario_final: readNumericOrNull(byField.precio_unitario),
+                    importe_calculado: _importe,
+                });
+            }
         });
 
         return { merge_lines: merge_lines, valuation_updates: valuation_updates };

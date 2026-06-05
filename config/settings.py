@@ -125,6 +125,34 @@ class Settings(BaseSettings):
         alias="SV3_PATH_REFETCH_CONTRATOS",
     )
 
+    # ------------------------------------------------------------ #
+    # Sigrid API — SOLO LECTURA para los desplegables de cabecera
+    # (elegir proveedor / obra). NO reintroduce el camino de escritura
+    # de contratos (UPSERT/PDF), que sigue yendo por sv3. Estas
+    # consultas (proveedores de una obra, lista de obras) son lookups
+    # de referencia para la UI. Mismos valores que el .env del sv3.
+    # Si falta alguna credencial, los endpoints /api/sigrid/* devuelven
+    # ok=false y el front mantiene la entrada manual.
+    # ------------------------------------------------------------ #
+    sigrid_api_base_url: str | None = Field(
+        default=None, alias="SIGRID_API_BASE_URL",
+    )
+    sigrid_api_function_key: str | None = Field(
+        default=None, alias="SIGRID_API_FUNCTION_KEY",
+    )
+    sigrid_api_database: str | None = Field(
+        default=None, alias="SIGRID_API_DATABASE",
+    )
+    sigrid_api_timeout_s: float = Field(30.0, alias="SIGRID_API_TIMEOUT_S")
+
+    @property
+    def sigrid_lookup_enabled(self) -> bool:
+        return bool(
+            (self.sigrid_api_base_url or "").strip()
+            and (self.sigrid_api_function_key or "").strip()
+            and (self.sigrid_api_database or "").strip()
+        )
+
     model_config = SettingsConfigDict(
         env_file=_ENV_FILE,
         env_file_encoding="utf-8",

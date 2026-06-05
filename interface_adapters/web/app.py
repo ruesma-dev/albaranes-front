@@ -19,6 +19,7 @@ from application.services.review_service import ReviewService
 from config.settings import Settings
 from domain.models.contrato_refetch_models import ContratoRefetchOutcome
 from domain.models.review_models import (
+    ConciliacionOverridePayload,
     DocumentDetailPayload,
     DocumentListFilters,
     HealthResponse,
@@ -34,6 +35,7 @@ from infrastructure.database.session_factory import SessionFactory
 from infrastructure.graph.token_provider import GraphTokenProvider
 from infrastructure.http.orchestrator_client import HttpOrchestratorClient
 from infrastructure.http.sv3_refetch_client import Sv3RefetchClient
+from infrastructure.sigrid.sigrid_lookup_client import SigridLookupClient
 
 logger = logging.getLogger(__name__)
 
@@ -176,6 +178,37 @@ def build_app(settings: Settings) -> FastAPI:
     )
     app.state.orchestrator_client = orchestrator_client
 
+    # ------------------------------------------------------------------ #
+    # Cliente de SOLO LECTURA a Sigrid para los desplegables de cabecera
+    # (elegir proveedor con contrato en la obra / elegir obra). Se
+    # construye solo si hay credenciales (SIGRID_API_*). Si no, queda
+    # None y los endpoints /api/sigrid/* responden ok=false (el front
+    # mantiene la entrada manual).
+    #
+    # Nota de arquitectura: el camino de ESCRITURA de contratos
+    # (UPSERT/PDF) sigue yendo por sv3. Esto es un lookup de referencia
+    # de solo lectura para la UI; no reintroduce aquel acoplamiento.
+    # ------------------------------------------------------------------ #
+    sigrid_lookup_client: SigridLookupClient | None = None
+    if settings.sigrid_lookup_enabled:
+        sigrid_lookup_client = SigridLookupClient(
+            base_url=settings.sigrid_api_base_url,
+            function_key=settings.sigrid_api_function_key,
+            database=settings.sigrid_api_database,
+            timeout_s=settings.sigrid_api_timeout_s,
+        )
+        logger.info(
+            "[sigrid-lookup][wiring] CABLEADO base_url=%s database=%s",
+            settings.sigrid_api_base_url,
+            settings.sigrid_api_database,
+        )
+    else:
+        logger.info(
+            "[sigrid-lookup][wiring] DESACTIVADO (faltan SIGRID_API_*); "
+            "los desplegables de cabecera quedaran en entrada manual."
+        )
+    app.state.sigrid_lookup_client = sigrid_lookup_client
+
     templates = Jinja2Templates(
         directory=str(Path(__file__).resolve().parents[2] / "templates")
     )
@@ -221,6 +254,55 @@ def build_app(settings: Settings) -> FastAPI:
     @app.get("/", include_in_schema=False)
     def root() -> RedirectResponse:
         return RedirectResponse(url="/documents", status_code=302)
+
+    # ------------------------------------------------------------------ #
+    # Desplegables de cabecera: lookups de SOLO LECTURA a Sigrid.
+    #   GET /api/sigrid/proveedores?obra={codigo}
+    #   GET /api/sigrid/obras
+    # Devuelven {ok, items:[...]} o {ok:false, error:...} (200 con ok=false
+    # para que el front muestre aviso y mantenga la entrada manual, sin
+    # romper la pagina).
+    # ------------------------------------------------------------------ #
+    @app.get("/api/sigrid/proveedores", include_in_schema=False)
+    def sigrid_proveedores(obra: str = Query(default="")) -> JSONResponse:
+        client = app.state.sigrid_lookup_client
+        if client is None:
+            return JSONResponse(
+                {"ok": False, "error": "Sigrid no configurado en el sv4 "
+                 "(faltan SIGRID_API_*).", "items": []}
+            )
+        codigo = (obra or "").strip()
+        if not codigo:
+            return JSONResponse(
+                {"ok": False, "error": "Falta el codigo de obra.", "items": []}
+            )
+        try:
+            proveedores = client.fetch_proveedores_por_obra(codigo_obra=codigo)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[sigrid-lookup] proveedores obra=%s fallo: %r", codigo, exc)
+            return JSONResponse(
+                {"ok": False, "error": f"Error consultando Sigrid: {exc}", "items": []}
+            )
+        items = [{"cif": p.cif, "nombre": p.nombre} for p in proveedores]
+        return JSONResponse({"ok": True, "items": items})
+
+    @app.get("/api/sigrid/obras", include_in_schema=False)
+    def sigrid_obras() -> JSONResponse:
+        client = app.state.sigrid_lookup_client
+        if client is None:
+            return JSONResponse(
+                {"ok": False, "error": "Sigrid no configurado en el sv4 "
+                 "(faltan SIGRID_API_*).", "items": []}
+            )
+        try:
+            obras = client.fetch_obras()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[sigrid-lookup] obras fallo: %r", exc)
+            return JSONResponse(
+                {"ok": False, "error": f"Error consultando Sigrid: {exc}", "items": []}
+            )
+        items = [{"codigo": o.codigo, "nombre": o.nombre} for o in obras]
+        return JSONResponse({"ok": True, "items": items})
 
     @app.get("/documents", response_class=HTMLResponse)
     def documents_list(
@@ -645,6 +727,37 @@ def build_app(settings: Settings) -> FastAPI:
                 "Valoración encolada. Refresca la página en unos "
                 "segundos para ver el resultado."
             ),
+        }
+
+    @app.patch(
+        "/api/documents/{document_id}/lines/{valuation_line_id}/conciliacion"
+    )
+    def set_line_conciliacion_api(
+        document_id: str,
+        valuation_line_id: int,
+        payload: ConciliacionOverridePayload,
+    ) -> dict:
+        ok = review_service.set_line_conciliacion(
+            document_id=document_id,
+            valuation_line_id=valuation_line_id,
+            mode=payload.mode,
+            matched_contrato_line_id=payload.matched_contrato_line_id,
+            descripcion=payload.descripcion,
+            precio_unitario=payload.precio_unitario,
+        )
+        if not ok:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "No se pudo aplicar la conciliacion (linea, contrato "
+                    "o modo no validos)."
+                ),
+            )
+        return {
+            "ok": True,
+            "document_id": document_id,
+            "valuation_line_id": valuation_line_id,
+            "mode": payload.mode,
         }
 
     @app.exception_handler(KeyError)

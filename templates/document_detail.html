@@ -334,6 +334,24 @@
                 </div>
 
                 <div class="form-grid two-columns">
+                    {% if document.is_editable %}
+                    <label class="full-width">
+                        <span>Elegir proveedor (con contrato en la obra · Sigrid)</span>
+                        <select id="proveedor_select" class="header-select"
+                                data-endpoint="/api/sigrid/proveedores"
+                                data-obra-input="obra_codigo"
+                                data-kind="proveedor"
+                                data-loaded="">
+                            {% if document.proveedor_cif or document.proveedor_nombre %}
+                            <option value="{{ document.proveedor_cif or '' }}"
+                                    data-nombre="{{ document.proveedor_nombre or '' }}" selected>
+                                {{ document.proveedor_nombre or 'Proveedor actual' }}{% if document.proveedor_cif %} — {{ document.proveedor_cif }}{% endif %}
+                            </option>
+                            {% endif %}
+                            <option value="">— escribir manualmente —</option>
+                        </select>
+                    </label>
+                    {% endif %}
                     <label>
                         <span>Proveedor</span>
                         <input type="text" id="proveedor_nombre" value="{{ document.proveedor_nombre or '' }}">
@@ -354,6 +372,23 @@
                         <span>Forma de pago</span>
                         <input type="text" id="forma_pago" value="{{ document.forma_pago or '' }}">
                     </label>
+                    {% if document.is_editable %}
+                    <label class="full-width">
+                        <span>Elegir obra (con contrato en Sigrid)</span>
+                        <select id="obra_select" class="header-select"
+                                data-endpoint="/api/sigrid/obras"
+                                data-kind="obra"
+                                data-loaded="">
+                            {% if document.obra_codigo or document.obra_nombre %}
+                            <option value="{{ document.obra_codigo or '' }}"
+                                    data-nombre="{{ document.obra_nombre or '' }}" selected>
+                                {{ document.obra_codigo or 's/codigo' }}{% if document.obra_nombre %} — {{ document.obra_nombre }}{% endif %}
+                            </option>
+                            {% endif %}
+                            <option value="">— escribir manualmente —</option>
+                        </select>
+                    </label>
+                    {% endif %}
                     <label>
                         <span>Código obra/proyecto</span>
                         <input type="text" id="obra_codigo" value="{{ document.obra_codigo or '' }}">
@@ -383,6 +418,7 @@
                             <span class="muted small">· valores de valoración aplicados</span>
                         {% endif %}
                     </h3>
+                    <button type="button" class="btn secondary small" id="undo-btn" title="Deshacer los cambios no guardados" hidden>Deshacer</button>
                     <button type="button" class="btn secondary small" id="add-line-btn">Añadir línea</button>
                 </div>
 
@@ -462,34 +498,25 @@
                                        albaran_line_valuations.unidad_contrato); para
                                        from_albaran es readonly (no se persiste en
                                        albaran_lines_merge, se muestra la valorada). #}
-                                    {% if dline.line_kind == 'synthetic_modifier' %}
-                                        <input type="text"
-                                               data-field="unidad"
-                                               value="{{ dline.unidad or '' }}"
-                                               {% if dline.is_valued %}class="valued"{% endif %}>
-                                    {% else %}
-                                        <input type="text"
-                                               data-field="unidad_display"
-                                               value="{{ dline.unidad or '' }}"
-                                               readonly
-                                               class="readonly-cell{% if dline.is_valued %} valued{% endif %}">
-                                    {% endif %}
+                                    {# Unidad editable para todas las lineas. En base se
+                                       persiste en albaran_line_valuations.unidad_contrato
+                                       (solo si la fila se edita; ver dirty-tracking en JS). #}
+                                    <input type="text"
+                                           data-field="unidad"
+                                           value="{{ dline.unidad or '' }}"
+                                           {% if dline.is_valued %}class="valued"{% endif %}>
                                 </td>
                                 <td>
                                     {# Precio unitario: editable para sintéticas; para
                                        from_albaran readonly (viene del contrato). #}
-                                    {% if dline.line_kind == 'synthetic_modifier' %}
-                                        <input type="number" step="any"
-                                               data-field="precio_unitario"
-                                               value="{{ dline.precio_unitario if dline.precio_unitario is not none else '' }}"
-                                               {% if dline.is_valued %}class="valued"{% endif %}>
-                                    {% else %}
-                                        <input type="number" step="any"
-                                               data-field="precio_unitario_display"
-                                               value="{{ dline.precio_unitario if dline.precio_unitario is not none else '' }}"
-                                               readonly
-                                               class="readonly-cell{% if dline.precio_unitario is not none %} valued{% endif %}">
-                                    {% endif %}
+                                    {# Precio unitario editable para todas las lineas. En base
+                                       se persiste en albaran_line_valuations.precio_unitario_final
+                                       (solo si la fila se edita). Al cambiarlo, el JS recalcula
+                                       el importe. #}
+                                    <input type="number" step="any"
+                                           data-field="precio_unitario"
+                                           value="{{ dline.precio_unitario if dline.precio_unitario is not none else '' }}"
+                                           {% if dline.is_valued %}class="valued"{% endif %}>
                                 </td>
                                 <td>
                                     {# Importe. Para from_albaran persiste en
@@ -550,10 +577,18 @@
                                     data-for-valuation-line-id="{{ dline.valuation_line_id if dline.valuation_line_id is not none else '' }}">
                                     {# Col # — origen de la conciliación #}
                                     <td class="concilia-td">
-                                        {% if c.kind == 'assigned' %}
-                                            <span class="concilia-badge concilia-badge-assigned">Sigrid</span>
+                                        {% if document.is_editable and dline.valuation_line_id is not none %}
+                                            {% if c.kind == 'assigned' %}
+                                            <button type="button" class="concilia-badge concilia-badge-assigned js-concilia-edit" title="Cambiar conciliacion">Sigrid ✎</button>
+                                            {% else %}
+                                            <button type="button" class="concilia-badge concilia-badge-derived js-concilia-edit" title="Cambiar conciliacion">Nueva ✎</button>
+                                            {% endif %}
                                         {% else %}
+                                            {% if c.kind == 'assigned' %}
+                                            <span class="concilia-badge concilia-badge-assigned">Sigrid</span>
+                                            {% else %}
                                             <span class="concilia-badge concilia-badge-derived">Nueva</span>
+                                            {% endif %}
                                         {% endif %}
                                     </td>
                                     {# Col Código imputación — partida del contrato #}
@@ -570,6 +605,15 @@
                                             <span class="concilia-sub">
                                                 Medición {{ '%.2f'|format(c.medicion_total) }}{% if c.unidad %} {{ c.unidad }}{% endif %}{% if c.medicion_pendiente is not none %} · Pdte {{ '%.2f'|format(c.medicion_pendiente) }}{% if c.unidad %} {{ c.unidad }}{% endif %}{% endif %}
                                             </span>
+                                        {% endif %}
+                                        {% if document.is_editable and dline.valuation_line_id is not none %}
+                                        <select class="concilia-select js-concilia-select" data-vid="{{ dline.valuation_line_id }}" hidden>
+                                            <option value="" disabled selected>— elegir línea de contrato —</option>
+                                            <option value="nueva">➕ Nueva — derivar a {{ dline.codigo_imputacion or c.codigo_partida or 'la partida' }}</option>
+                                            {% for cl in document.contrato_lines %}
+                                            <option value="{{ cl.id }}">{{ cl.codigo_partida or '—' }} · {{ cl.descripcion or '' }} · {{ '%.2f'|format(cl.precio_unitario) if cl.precio_unitario is not none else '—' }} €</option>
+                                            {% endfor %}
+                                        </select>
                                         {% endif %}
                                     </td>
                                     {# Col Cantidad — n/a para la línea de contrato #}
