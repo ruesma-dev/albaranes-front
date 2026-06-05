@@ -411,145 +411,152 @@
     // inputs existentes (que son los que se guardan por id). "Escribir
     // manualmente" (value vacio) no toca nada.
     // --------------------------------------------------------------- //
-    function _setVal(id, value) {
-        const el = document.getElementById(id);
-        if (el) el.value = value;
+    // --------------------------------------------------------------- //
+    // Comboboxes de cabecera (elegir proveedor / obra) CON BUSQUEDA.
+    // Sustituyen a los <select>: un input donde escribes y filtra por
+    // SUBCADENA (sin distinguir mayusculas ni acentos) sobre la lista
+    // que se trae de Sigrid bajo demanda (al enfocar). Al elegir, rellena
+    // los inputs reales (proveedor_cif/nombre, obra_codigo/nombre) que son
+    // los que se guardan. La caja de busqueda no se guarda.
+    // --------------------------------------------------------------- //
+    function _norm(s) {
+        return (s || "").toString().toLowerCase()
+            .normalize("NFD").replace(/[\u0300-\u036f]/g, "");
     }
-    function _labelFor(kind, val, nombre) {
+    function _comboLabel(kind, val, nombre) {
         if (kind === "obra") {
             return (val || "s/codigo") + (nombre ? " — " + nombre : "");
         }
         return (nombre || "Sin nombre") + (val ? " — " + val : "");
     }
-    function _selectedNombre(select) {
-        const opt = (select.selectedIndex >= 0) ? select.options[select.selectedIndex] : null;
-        return opt ? (opt.getAttribute("data-nombre") || "") : "";
-    }
-    // Reconstruye opciones: [actual (preseleccionada)] + items + manual + [error].
-    function _rebuildOptions(select, items, opts) {
-        opts = opts || {};
-        const kind = select.dataset.kind;
-        const current = (opts.current != null) ? opts.current : select.value;
-        const currentNombre = opts.currentNombre || "";
-        const hasCurrent = !!(current && current.length);
-        select.innerHTML = "";
-        const frag = document.createDocumentFragment();
-        if (hasCurrent) {
-            const o = document.createElement("option");
-            o.value = current;
-            o.setAttribute("data-nombre", currentNombre);
-            o.textContent = _labelFor(kind, current, currentNombre) + " (actual)";
-            o.selected = true;
-            frag.appendChild(o);
-        }
-        (items || []).forEach(function (it) {
-            const val = (kind === "obra") ? (it.codigo || "") : (it.cif || "");
-            const nombre = it.nombre || "";
-            if (hasCurrent && val === current) return;
-            const o = document.createElement("option");
-            o.value = val;
-            o.setAttribute("data-nombre", nombre);
-            o.textContent = _labelFor(kind, val, nombre);
-            frag.appendChild(o);
-        });
-        const man = document.createElement("option");
-        man.value = "";
-        man.textContent = "— escribir manualmente —";
-        frag.appendChild(man);
-        if (opts.error) {
-            const e = document.createElement("option");
-            e.value = ""; e.disabled = true;
-            e.textContent = "⚠ " + opts.error;
-            frag.appendChild(e);
-        } else if (opts.empty) {
-            const e = document.createElement("option");
-            e.value = ""; e.disabled = true;
-            e.textContent = "(sin resultados en Sigrid)";
-            frag.appendChild(e);
-        }
-        select.appendChild(frag);
-        select.value = hasCurrent ? current : "";
-    }
-    function _showLoading(select) {
-        const current = select.value;
-        const currentNombre = _selectedNombre(select);
-        select.innerHTML = "";
-        if (current) {
-            const o = document.createElement("option");
-            o.value = current; o.setAttribute("data-nombre", currentNombre);
-            o.textContent = _labelFor(select.dataset.kind, current, currentNombre) + " (actual)";
-            o.selected = true; select.appendChild(o);
-        }
-        const l = document.createElement("option");
-        l.value = current || ""; l.disabled = true;
-        l.textContent = "Cargando de Sigrid…";
-        select.appendChild(l);
-        select.value = current || "";
-        return { current: current, currentNombre: currentNombre };
-    }
-    // Carga BAJO DEMANDA al enfocar el desplegable. Para proveedores
-    // depende de la obra actual: si cambia, vuelve a consultar.
-    async function _loadSigridOptions(select) {
-        const endpoint = select.dataset.endpoint;
-        if (!endpoint) return;
-        let url = endpoint;
-        let obraVal = "";
-        if (select.dataset.obraInput) {
-            const obraEl = document.getElementById(select.dataset.obraInput);
-            obraVal = obraEl ? (obraEl.value || "").trim() : "";
-            url = endpoint + "?obra=" + encodeURIComponent(obraVal);
-        }
-        const loadKey = obraVal || "_";
-        if (select.dataset.loaded === "loading") return;
-        if (select.dataset.loaded === "1" && select.dataset.loadedKey === loadKey) return;
 
-        select.dataset.loaded = "loading";
-        const snap = _showLoading(select);
-        try {
-            const resp = await fetch(url, { headers: { "Accept": "application/json" } });
-            const data = await resp.json();
-            if (!data || !data.ok) {
-                _rebuildOptions(select, [], {
-                    current: snap.current, currentNombre: snap.currentNombre,
-                    error: (data && data.error) || "Sigrid no disponible",
+    function initCombo(combo) {
+        const input = combo.querySelector(".combo-input");
+        const panel = combo.querySelector(".combo-panel");
+        if (!input || !panel) return;
+        const kind = combo.dataset.kind;
+        const endpoint = combo.dataset.endpoint;
+        const valInputId = combo.dataset.valInput;
+        const nombreInputId = combo.dataset.nombreInput;
+        const obraInputId = combo.dataset.obraInput || "";
+
+        let items = [];        // [{val, nombre, label, norm}]
+        let filtered = [];
+        let loadedKey = null;  // clave (obra) para la que se cargo
+        let loading = false;
+        let activeIdx = -1;
+
+        function currentObra() {
+            if (!obraInputId) return "";
+            const el = document.getElementById(obraInputId);
+            return el ? (el.value || "").trim() : "";
+        }
+        function close() { panel.hidden = true; activeIdx = -1; }
+        function msg(text, cls) {
+            panel.innerHTML = "";
+            const d = document.createElement("div");
+            d.className = "combo-msg" + (cls ? " " + cls : "");
+            d.textContent = text;
+            panel.appendChild(d);
+            panel.hidden = false;
+        }
+        function render(list) {
+            filtered = list;
+            if (loading) { msg("Cargando de Sigrid…"); return; }
+            if (!list.length) { msg("Sin coincidencias"); return; }
+            panel.innerHTML = "";
+            list.forEach(function (it, i) {
+                const d = document.createElement("div");
+                d.className = "combo-item" + (i === activeIdx ? " active" : "");
+                d.textContent = it.label;
+                // mousedown (no click) para que dispare antes del blur del input
+                d.addEventListener("mousedown", function (e) {
+                    e.preventDefault();
+                    choose(it);
                 });
-                select.dataset.loaded = "";   // permitir reintento
-                return;
-            }
-            const items = data.items || [];
-            _rebuildOptions(select, items, {
-                current: snap.current, currentNombre: snap.currentNombre,
-                empty: items.length === 0,
+                panel.appendChild(d);
             });
-            select.dataset.loaded = "1";
-            select.dataset.loadedKey = loadKey;
-        } catch (e) {
-            _rebuildOptions(select, [], {
-                current: snap.current, currentNombre: snap.currentNombre,
-                error: "Error de red consultando Sigrid",
-            });
-            select.dataset.loaded = "";
+            panel.hidden = false;
         }
+        function applyFilter() {
+            activeIdx = -1;
+            const q = _norm(input.value);
+            if (!q) { render(items); return; }
+            render(items.filter(function (it) { return it.norm.indexOf(q) !== -1; }));
+        }
+        function choose(it) {
+            const vEl = document.getElementById(valInputId);
+            const nEl = document.getElementById(nombreInputId);
+            if (vEl) vEl.value = it.val || "";
+            if (nEl) nEl.value = it.nombre || "";
+            input.value = it.label;
+            combo.dataset.label = it.label;
+            close();
+        }
+        async function ensureLoaded() {
+            const key = obraInputId ? (currentObra() || "_") : "_";
+            if (loading) return;
+            if (loadedKey === key && items.length) return;
+            loading = true; loadedKey = key;
+            msg("Cargando de Sigrid…");
+            let url = endpoint;
+            if (obraInputId) url += "?obra=" + encodeURIComponent(currentObra());
+            try {
+                const resp = await fetch(url, { headers: { "Accept": "application/json" } });
+                const data = await resp.json();
+                loading = false;
+                if (!data || !data.ok) {
+                    items = []; loadedKey = null;
+                    msg("⚠ " + ((data && data.error) || "Sigrid no disponible"), "combo-error");
+                    return;
+                }
+                items = (data.items || []).map(function (it) {
+                    const val = (kind === "obra") ? (it.codigo || "") : (it.cif || "");
+                    const nombre = it.nombre || "";
+                    const label = _comboLabel(kind, val, nombre);
+                    return { val: val, nombre: nombre, label: label, norm: _norm(label) };
+                });
+                applyFilter();
+            } catch (e) {
+                loading = false; items = []; loadedKey = null;
+                msg("⚠ Error de red consultando Sigrid", "combo-error");
+            }
+        }
+
+        input.addEventListener("focus", function () {
+            input.select();
+            ensureLoaded();
+        });
+        input.addEventListener("input", function () {
+            if (items.length || loading) applyFilter();
+            else ensureLoaded();
+        });
+        input.addEventListener("keydown", function (e) {
+            if (e.key === "ArrowDown") {
+                if (panel.hidden) { applyFilter(); return; }
+                activeIdx = Math.min(activeIdx + 1, filtered.length - 1);
+                render(filtered); e.preventDefault();
+            } else if (e.key === "ArrowUp") {
+                activeIdx = Math.max(activeIdx - 1, 0);
+                render(filtered); e.preventDefault();
+            } else if (e.key === "Enter") {
+                if (activeIdx >= 0 && filtered[activeIdx]) {
+                    choose(filtered[activeIdx]); e.preventDefault();
+                }
+            } else if (e.key === "Escape") {
+                close();
+            }
+        });
+        input.addEventListener("blur", function () {
+            // retardo para permitir el mousedown de un item
+            setTimeout(function () {
+                close();
+                if (combo.dataset.label != null) input.value = combo.dataset.label;
+            }, 150);
+        });
     }
 
-    const proveedorSelect = document.getElementById("proveedor_select");
-    if (proveedorSelect) {
-        proveedorSelect.addEventListener("focus", function () { _loadSigridOptions(this); });
-        proveedorSelect.addEventListener("change", function () {
-            if (!this.value) return;   // "escribir manualmente" no toca nada
-            _setVal("proveedor_cif", this.value);
-            _setVal("proveedor_nombre", _selectedNombre(this));
-        });
-    }
-    const obraSelect = document.getElementById("obra_select");
-    if (obraSelect) {
-        obraSelect.addEventListener("focus", function () { _loadSigridOptions(this); });
-        obraSelect.addEventListener("change", function () {
-            if (!this.value) return;
-            _setVal("obra_codigo", this.value);
-            _setVal("obra_nombre", _selectedNombre(this));
-        });
-    }
+    document.querySelectorAll(".combo").forEach(initCombo);
 
     function readNumericOrNull(input) {
         if (!input) return null;

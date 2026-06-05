@@ -392,6 +392,35 @@ textarea { resize: vertical; }
 /* Desplegables de cabecera (elegir proveedor / obra con contrato). */
 .header-select { width: 100%; background: white; cursor: pointer; }
 
+/* Comboboxes de cabecera con busqueda (elegir proveedor / obra). */
+.combo { position: relative; width: 100%; }
+.combo-input { width: 100%; background: white; }
+.combo-panel {
+    position: absolute;
+    top: 100%;
+    left: 0;
+    right: 0;
+    z-index: 40;
+    margin-top: 4px;
+    max-height: 280px;
+    overflow-y: auto;
+    background: var(--panel, #fff);
+    border: 1px solid var(--border, #d0d7de);
+    border-radius: 10px;
+    box-shadow: var(--shadow, 0 8px 24px rgba(0,0,0,0.12));
+}
+.combo-item {
+    padding: 8px 12px;
+    cursor: pointer;
+    font-size: 0.92rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.combo-item:hover, .combo-item.active { background: #e8f0fe; }
+.combo-msg { padding: 8px 12px; font-size: 0.88rem; color: #6b7280; }
+.combo-error { color: #b42318; }
+
 .contrato-scroll::-webkit-scrollbar { height: 8px; }
 .contrato-scroll::-webkit-scrollbar-track { background: #eef2ff; border-radius: 4px; }
 .contrato-scroll::-webkit-scrollbar-thumb { background: #94a3b8; border-radius: 4px; }

@@ -336,20 +336,18 @@
                 <div class="form-grid two-columns">
                     {% if document.is_editable %}
                     <label class="full-width">
-                        <span>Elegir proveedor (con contrato en la obra · Sigrid)</span>
-                        <select id="proveedor_select" class="header-select"
-                                data-endpoint="/api/sigrid/proveedores"
-                                data-obra-input="obra_codigo"
-                                data-kind="proveedor"
-                                data-loaded="">
-                            {% if document.proveedor_cif or document.proveedor_nombre %}
-                            <option value="{{ document.proveedor_cif or '' }}"
-                                    data-nombre="{{ document.proveedor_nombre or '' }}" selected>
-                                {{ document.proveedor_nombre or 'Proveedor actual' }}{% if document.proveedor_cif %} — {{ document.proveedor_cif }}{% endif %}
-                            </option>
-                            {% endif %}
-                            <option value="">— escribir manualmente —</option>
-                        </select>
+                        <span>Elegir proveedor (con contrato en la obra · Sigrid) — escribe para buscar</span>
+                        <div class="combo" data-kind="proveedor"
+                             data-endpoint="/api/sigrid/proveedores"
+                             data-obra-input="obra_codigo"
+                             data-val-input="proveedor_cif"
+                             data-nombre-input="proveedor_nombre"
+                             data-label="{{ document.proveedor_nombre or '' }}{% if document.proveedor_cif %} — {{ document.proveedor_cif }}{% endif %}">
+                            <input type="text" class="combo-input" id="proveedor_combo"
+                                   autocomplete="off" placeholder="Escribe para buscar (p.ej. cera)…"
+                                   value="{{ document.proveedor_nombre or '' }}{% if document.proveedor_cif %} — {{ document.proveedor_cif }}{% endif %}">
+                            <div class="combo-panel" hidden></div>
+                        </div>
                     </label>
                     {% endif %}
                     <label>
@@ -374,19 +372,17 @@
                     </label>
                     {% if document.is_editable %}
                     <label class="full-width">
-                        <span>Elegir obra (con contrato en Sigrid)</span>
-                        <select id="obra_select" class="header-select"
-                                data-endpoint="/api/sigrid/obras"
-                                data-kind="obra"
-                                data-loaded="">
-                            {% if document.obra_codigo or document.obra_nombre %}
-                            <option value="{{ document.obra_codigo or '' }}"
-                                    data-nombre="{{ document.obra_nombre or '' }}" selected>
-                                {{ document.obra_codigo or 's/codigo' }}{% if document.obra_nombre %} — {{ document.obra_nombre }}{% endif %}
-                            </option>
-                            {% endif %}
-                            <option value="">— escribir manualmente —</option>
-                        </select>
+                        <span>Elegir obra (Sigrid) — escribe para buscar</span>
+                        <div class="combo" data-kind="obra"
+                             data-endpoint="/api/sigrid/obras"
+                             data-val-input="obra_codigo"
+                             data-nombre-input="obra_nombre"
+                             data-label="{{ document.obra_codigo or '' }}{% if document.obra_nombre %} — {{ document.obra_nombre }}{% endif %}">
+                            <input type="text" class="combo-input" id="obra_combo"
+                                   autocomplete="off" placeholder="Escribe para buscar (codigo o nombre)…"
+                                   value="{{ document.obra_codigo or '' }}{% if document.obra_nombre %} — {{ document.obra_nombre }}{% endif %}">
+                            <div class="combo-panel" hidden></div>
+                        </div>
                     </label>
                     {% endif %}
                     <label>
