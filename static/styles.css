@@ -107,6 +107,17 @@ textarea { resize: vertical; }
 .table { width: 100%; border-collapse: collapse; }
 .table th, .table td { border-bottom: 1px solid var(--border); padding: 12px 10px; vertical-align: top; text-align: left; }
 .table th a { color: var(--text); text-decoration: none; }
+/* Lista de documentos: la columna "Acciones" queda fija a la izquierda
+   al hacer scroll horizontal de la tabla (.table-scroll). */
+.docs-table th.sticky-col,
+.docs-table td.sticky-col {
+    position: sticky;
+    left: 0;
+    z-index: 1;
+    background: #fff;
+    box-shadow: 2px 0 4px rgba(0, 0, 0, 0.06);
+}
+.docs-table thead th.sticky-col { z-index: 2; }
 
 .actions-cell { display: flex; gap: 8px; flex-wrap: wrap; }
 
@@ -420,6 +431,34 @@ textarea { resize: vertical; }
 .combo-item:hover, .combo-item.active { background: #e8f0fe; }
 .combo-msg { padding: 8px 12px; font-size: 0.88rem; color: #6b7280; }
 .combo-error { color: #b42318; }
+/* Combo de UNA pieza para elegir/cambiar la linea de contrato en las filas
+   salmon: casilla que al enfocar abre la lista y filtra al escribir. El
+   panel va FIXED (posicionado por JS) porque la tabla de lineas tiene
+   scroll y un panel absoluto se recortaria. */
+.combo-lines { width: 100%; min-width: 220px; }
+.combo-lines .combo-input {
+    padding: 6px 10px;
+    font-size: 0.9rem;
+    border: 1px solid var(--border, #d0d7de);
+    border-radius: 8px;
+    background: #fffef7;
+    box-shadow: inset 2px 0 0 var(--accent, #9f2842);
+}
+.combo-lines .combo-input::placeholder { color: #9aa3ab; }
+.combo-lines .combo-panel {
+    position: fixed;   /* JS fija top/left/min-width al abrir */
+    right: auto;
+    z-index: 1000;
+    max-height: 340px;
+}
+.combo-lines .combo-item { white-space: normal; }
+/* Sugerencia automatica por coincidencia de texto (la IA no fijo el
+   codigo/CIF): realce ambar para que el revisor sepa que debe verificar. */
+.combo-suggested .combo-input {
+    background: #fffbeb;
+    border-color: #f59e0b;
+    box-shadow: inset 3px 0 0 #f59e0b;
+}
 
 .contrato-scroll::-webkit-scrollbar { height: 8px; }
 .contrato-scroll::-webkit-scrollbar-track { background: #eef2ff; border-radius: 4px; }
@@ -584,6 +623,26 @@ tr.conciliacion-row.concilia-assigned > td.concilia-td:first-child {
 tr.conciliacion-row.concilia-derived > td.concilia-td:first-child {
     box-shadow: inset 3px 0 0 #C68A4A;
 }
+/* "Traer linea de contrato" en lineas NO casadas: boton + y fila salmon. */
+.add-concilia-btn {
+    background: #fff;
+    border: 1px solid #E0A892;
+    color: #B4502F;
+    border-radius: 6px;
+    width: 20px;
+    height: 20px;
+    padding: 0;
+    margin-right: 2px;
+    cursor: pointer;
+    font-size: 14px;
+    line-height: 1;
+    font-weight: 700;
+}
+.add-concilia-btn:hover { background: #FBEAE3; }
+tr.conciliacion-row.concilia-add > td.concilia-td { background: #FBEAE3; }
+tr.conciliacion-row.concilia-add > td.concilia-td:first-child {
+    box-shadow: inset 3px 0 0 #D9795B;
+}
 .concilia-td .concilia-val {
     display: block;
     font-weight: 500;
@@ -637,6 +696,18 @@ tr.conciliacion-row.concilia-derived > td.concilia-td:first-child {
 .concilia-badge-derived {
     background: #F5E8D4;
     color: #7A5018;
+}
+button.concilia-badge.concilia-badge-remove {
+    margin-left: 6px;
+    background: #F6E0E0;
+    color: #9A2A2A;
+    border: 1px solid #E4B9B9;
+    cursor: pointer;
+}
+button.concilia-badge.concilia-badge-remove:hover {
+    background: #9A2A2A;
+    color: #FFF;
+    border-color: #9A2A2A;
 }
 .concilia-desc {
     font-weight: 500;

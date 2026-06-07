@@ -75,22 +75,39 @@
 
 <section class="panel table-panel">
     <div class="table-scroll">
-        <table class="table">
+        <table class="table docs-table">
             <thead>
             <tr>
+                <th class="sticky-col">Acciones</th>
                 <th><a href="/documents?{{ build_sort_query('proveedor_nombre') }}">Proveedor</a></th>
                 <th><a href="/documents?{{ build_sort_query('fecha') }}">Fecha</a></th>
                 <th><a href="/documents?{{ build_sort_query('obra_codigo') }}">Obra</a></th>
                 <th><a href="/documents?{{ build_sort_query('numero_albaran') }}">Albarán</a></th>
+                <th class="num-cell">Importe valorado</th>
+                <th>Contrato</th>
                 <th><a href="/documents?{{ build_sort_query('confidence_pct_calc') }}">Confianza</a></th>
                 <th><a href="/documents?{{ build_sort_query('approved') }}">Aprobado</a></th>
                 <th>Archivo</th>
-                <th>Acciones</th>
             </tr>
             </thead>
             <tbody>
             {% for item in result.items %}
                 <tr>
+                    <td class="actions-cell sticky-col">
+                        <a href="/documents/{{ item.id }}" class="btn small">Revisar</a>
+                        {% if item.approved %}
+                            <form method="post" action="/documents/{{ item.id }}/unapprove">
+                                <input type="hidden" name="redirect_query" value="{{ current_query }}">
+                                <button type="submit" class="btn small secondary">Desaprobar</button>
+                            </form>
+                        {% else %}
+                            <form method="post" action="/documents/{{ item.id }}/approve">
+                                <input type="hidden" name="redirect_query" value="{{ current_query }}">
+                                <input type="hidden" name="approved_by" value="">
+                                <button type="submit" class="btn small success">Aprobar</button>
+                            </form>
+                        {% endif %}
+                    </td>
                     <td>
                         <a class="link-strong" href="/documents/{{ item.id }}">{{ item.proveedor_nombre or '—' }}</a>
                     </td>
@@ -102,6 +119,23 @@
                         {% endif %}
                     </td>
                     <td>{{ item.numero_albaran or '—' }}</td>
+                    <td class="num-cell">
+                        {% if item.total_valorado is not none %}
+                            {{ item.total_valorado | importe_eur }}
+                        {% else %}
+                            —
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if item.contrato_codigo %}
+                            <div class="link-strong">{{ item.contrato_codigo }}</div>
+                            {% if item.contrato_nombre %}
+                                <div class="muted small">{{ item.contrato_nombre }}</div>
+                            {% endif %}
+                        {% else %}
+                            —
+                        {% endif %}
+                    </td>
                     <td>
                         {% if item.confidence_pct_calc is not none %}
                             <span class="confidence-badge {{ 'low' if item.confidence_pct_calc < 80 else 'ok' }}">
@@ -127,25 +161,10 @@
                             <div class="muted small">{{ item.source_document_id }}</div>
                         {% endif %}
                     </td>
-                    <td class="actions-cell">
-                        <a href="/documents/{{ item.id }}" class="btn small">Revisar</a>
-                        {% if item.approved %}
-                            <form method="post" action="/documents/{{ item.id }}/unapprove">
-                                <input type="hidden" name="redirect_query" value="{{ current_query }}">
-                                <button type="submit" class="btn small secondary">Desaprobar</button>
-                            </form>
-                        {% else %}
-                            <form method="post" action="/documents/{{ item.id }}/approve">
-                                <input type="hidden" name="redirect_query" value="{{ current_query }}">
-                                <input type="hidden" name="approved_by" value="">
-                                <button type="submit" class="btn small success">Aprobar</button>
-                            </form>
-                        {% endif %}
-                    </td>
                 </tr>
             {% else %}
                 <tr>
-                    <td colspan="8" class="empty-cell">No hay documentos para mostrar.</td>
+                    <td colspan="10" class="empty-cell">No hay documentos para mostrar.</td>
                 </tr>
             {% endfor %}
             </tbody>

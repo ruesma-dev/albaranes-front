@@ -67,6 +67,9 @@ class DocumentListItem(BaseModel):
     confidence_pct_calc: float | None = None
     review_required: bool | None = None
     approved: bool = False
+    total_valorado: float | None = None
+    contrato_codigo: str | None = None
+    contrato_nombre: str | None = None
     provider_origin: str
     created_at_utc: str
     document_url: str | None = None
@@ -335,6 +338,30 @@ class ConciliacionDisplay(BaseModel):
     #                 derived sin hermana de Sigrid)
     price_agreement: str | None = None
     precio_unitario_final: float | None = None  # el de la valoración
+
+    # Avisos por campo de la fila salmon, comparando lo DECLARADO en la
+    # linea blanca (lo leido del albaran) contra la referencia de contrato:
+    #   True  -> declarado presente y coincide      (✓)
+    #   False -> declarado presente pero difiere     (⚠)
+    #   None  -> nada declarado que comparar          (sin icono)
+    # Los calcula el repositorio en _build_display_lines (tiene a la vez
+    # la linea blanca/merge y esta conciliacion).
+    agree_partida: bool | None = None
+    agree_cantidad: bool | None = None
+    agree_unitario: bool | None = None
+
+    # Senales para el calculo determinista de CONFIANZA (no se pintan):
+    #   match_method / match_confidence_pct -> distinguir match fuerte
+    #     (codigo/exacto) de semantico-familia (conf <= 50) y de manual.
+    #   precio_unitario_source -> 'manual_contract'/'manual_derived' = el
+    #     revisor lo fijo a mano.
+    #   derived_origen -> 'manual_override' (nueva del revisor) vs
+    #     'nueva_no_match' (nueva automatica: la IA no caso).
+    match_method: str | None = None
+    match_confidence_pct: float | None = None
+    precio_unitario_source: str | None = None
+    derived_origen: str | None = None
+    agree_importe: bool | None = None
 
     # Solo para kind='derived': si la línea nueva se creó por
     # discrepancia de precio con una línea hermana de Sigrid, esta

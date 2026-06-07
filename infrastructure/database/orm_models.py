@@ -29,6 +29,10 @@ class AlbaranDocumentMergeOrm(Base):
     numero_albaran: Mapped[str | None] = mapped_column(String(128))
     forma_pago: Mapped[str | None] = mapped_column(String(128))
     obra_codigo: Mapped[str | None] = mapped_column(String(128))
+    # Origen de la resolucion de cabecera (sv3): 'ia' | 'deterministic'
+    # | 'manual' | NULL. Lo usa el calculo de confianza de valoracion.
+    obra_codigo_origen: Mapped[str | None] = mapped_column(String(24))
+    proveedor_cif_origen: Mapped[str | None] = mapped_column(String(24))
     obra_nombre: Mapped[str | None] = mapped_column(String(255))
     obra_direccion: Mapped[str | None] = mapped_column(String(255))
 

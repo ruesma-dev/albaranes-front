@@ -312,6 +312,8 @@
                     <button type="button"
                             class="btn primary"
                             id="valuate-btn"
+                            data-current-val-id="{{ valuation.valuation_id if valuation else '' }}"
+                            data-current-val-ts="{{ valuation.created_at_utc if valuation else '' }}"
                             title="Guarda el contrato seleccionado y lanza la valoración (líneas sintéticas, conciliación…)">
                         Valorar ahora
                     </button>
@@ -471,6 +473,10 @@
                                                 class="js-toggle-concilia chev expanded"
                                                 aria-expanded="true"
                                                 title="Ocultar conciliación">▾</button>
+                                    {% elif document.is_editable and dline.merge_line_id is not none %}
+                                        <button type="button"
+                                                class="js-add-concilia add-concilia-btn"
+                                                title="Traer una línea de contrato a esta línea">+</button>
                                     {% endif %}
                                     <span class="line-num">{{ loop.index }}</span>
                                 </td>
@@ -586,10 +592,21 @@
                                             <span class="concilia-badge concilia-badge-derived">Nueva</span>
                                             {% endif %}
                                         {% endif %}
+                                        {% if document.is_editable and dline.valuation_line_id is not none %}
+                                            <button type="button"
+                                                    class="concilia-badge concilia-badge-remove js-concilia-remove"
+                                                    title="Borrar esta linea salmon (no se llevara a Sigrid; deja de sumar al total)">Borrar ✕</button>
+                                        {% endif %}
                                     </td>
                                     {# Col Código imputación — partida del contrato #}
                                     <td class="concilia-td">
-                                        <span class="concilia-val">{{ c.codigo_partida or '—' }}</span>
+                                        {% if c.agree_partida == true %}
+                                            <span class="concilia-price-ok"><span class="concilia-icon" aria-hidden="true">✓</span> {{ c.codigo_partida or '—' }}</span>
+                                        {% elif c.agree_partida == false %}
+                                            <span class="concilia-price-warn"><span class="concilia-icon" aria-hidden="true">⚠</span> {{ c.codigo_partida or '—' }}</span>
+                                        {% else %}
+                                            <span class="concilia-val">{{ c.codigo_partida or '—' }}</span>
+                                        {% endif %}
                                         {% if c.descripcion_partida %}
                                             <span class="concilia-sub">{{ c.descripcion_partida }}</span>
                                         {% endif %}
@@ -612,25 +629,47 @@
                                         </select>
                                         {% endif %}
                                     </td>
-                                    {# Col Cantidad — n/a para la línea de contrato #}
-                                    <td class="concilia-td concilia-muted">—</td>
+                                    {# Col Cantidad — copiada de la línea de albarán de arriba. #}
+                                    <td class="concilia-td">
+                                        {% if dline.cantidad is not none %}
+                                            {% if c.agree_cantidad == true %}
+                                                <span class="concilia-price-ok"><span class="concilia-icon" aria-hidden="true">✓</span> {{ dline.cantidad }}</span>
+                                            {% elif c.agree_cantidad == false %}
+                                                <span class="concilia-price-warn"><span class="concilia-icon" aria-hidden="true">⚠</span> {{ dline.cantidad }}</span>
+                                            {% else %}
+                                                <span class="concilia-val">{{ dline.cantidad }}</span>
+                                            {% endif %}
+                                        {% else %}—{% endif %}
+                                    </td>
                                     {# Col Unidad #}
                                     <td class="concilia-td">{{ c.unidad or '—' }}</td>
                                     {# Col Precio unitario — PRECIO DEL CONTRATO DE SIGRID, alineado
                                        con el precio valorado de la fila de arriba. Verde si cuadra,
                                        rojo si difiere. #}
                                     <td class="concilia-td">
-                                        {% if c.price_agreement == 'agree' %}
+                                        {% if c.agree_unitario == true %}
                                             <span class="concilia-price-ok"><span class="concilia-icon" aria-hidden="true">✓</span> {{ c.unitario | importe_eur }}</span>
-                                        {% elif c.price_agreement == 'disagree' %}
+                                        {% elif c.agree_unitario == false %}
                                             <span class="concilia-price-warn"><span class="concilia-icon" aria-hidden="true">⚠</span> {{ c.unitario | importe_eur }}</span>
                                         {% else %}
                                             <span class="concilia-val">{{ c.unitario | importe_eur if c.unitario is not none else '—' }}</span>
                                         {% endif %}
                                         <span class="concilia-sub">precio contrato</span>
                                     </td>
-                                    {# Col Importe — n/a #}
-                                    <td class="concilia-td concilia-muted">—</td>
+                                    {# Col Importe — calculado: cantidad (de arriba) * precio
+                                       unitario del contrato. NO se escribe en la línea blanca. #}
+                                    <td class="concilia-td">
+                                        {% if dline.cantidad is not none and c.unitario is not none %}
+                                            {% if c.agree_importe == true %}
+                                                <span class="concilia-price-ok"><span class="concilia-icon" aria-hidden="true">✓</span> {{ (dline.cantidad * c.unitario) | importe_eur }}</span>
+                                            {% elif c.agree_importe == false %}
+                                                <span class="concilia-price-warn"><span class="concilia-icon" aria-hidden="true">⚠</span> {{ (dline.cantidad * c.unitario) | importe_eur }}</span>
+                                            {% else %}
+                                                <span class="concilia-val">{{ (dline.cantidad * c.unitario) | importe_eur }}</span>
+                                            {% endif %}
+                                            <span class="concilia-sub">cant × precio contrato</span>
+                                        {% else %}—{% endif %}
+                                    </td>
                                     {# Col Descuento — n/a #}
                                     <td class="concilia-td concilia-muted">—</td>
                                     {# Col Código — n/a #}
@@ -642,6 +681,9 @@
                         {% endfor %}
                         </tbody>
                     </table>
+                    {# Lineas de contrato disponibles, para construir el
+                       desplegable al pulsar "+" en una linea no casada. #}
+                    <script type="application/json" id="contrato-lines-json">[{% for cl in document.contrato_lines %}{"id": {{ cl.id }}, "label": {{ ((cl.codigo_partida or '—') ~ ' · ' ~ (cl.descripcion or '') ~ ' · ' ~ (('%.2f'|format(cl.precio_unitario) ~ ' €') if cl.precio_unitario is not none else '—')) | tojson }}}{% if not loop.last %},{% endif %}{% endfor %}]</script>
                 </div>
             </form>
         {% else %}

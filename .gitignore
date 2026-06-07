@@ -193,3 +193,5 @@ input/
 input_albaranes/
 input_residuos/
 logs/
+*.txt
+*.zip

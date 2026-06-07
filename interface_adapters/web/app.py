@@ -760,6 +760,72 @@ def build_app(settings: Settings) -> FastAPI:
             "mode": payload.mode,
         }
 
+    @app.delete(
+        "/api/documents/{document_id}/lines/{valuation_line_id}/conciliacion"
+    )
+    def remove_line_conciliacion_api(
+        document_id: str,
+        valuation_line_id: int,
+    ) -> dict:
+        ok = review_service.remove_line_conciliacion(
+            document_id=document_id,
+            valuation_line_id=valuation_line_id,
+        )
+        if not ok:
+            raise HTTPException(
+                status_code=400,
+                detail="No se pudo borrar la conciliacion (linea no valida).",
+            )
+        return {
+            "ok": True,
+            "document_id": document_id,
+            "valuation_line_id": valuation_line_id,
+        }
+
+    @app.post(
+        "/api/documents/{document_id}/lines/by-merge/{merge_line_id}/conciliacion"
+    )
+    def add_conciliacion_for_merge_line_api(
+        document_id: str,
+        merge_line_id: int,
+        payload: ConciliacionOverridePayload,
+    ) -> dict:
+        # Trae una conciliacion a una linea NO casada. Admite:
+        #  - mode=contract_line + matched_contrato_line_id (salmon Sigrid)
+        #  - mode=nueva (salmon Nueva, copia la blanca del albaran)
+        if payload.mode == "contract_line" and payload.matched_contrato_line_id is None:
+            raise HTTPException(
+                status_code=400,
+                detail="Se requiere matched_contrato_line_id para mode=contract_line.",
+            )
+        if payload.mode not in ("contract_line", "nueva"):
+            raise HTTPException(
+                status_code=400,
+                detail="mode no valido (contract_line | nueva).",
+            )
+        ok = review_service.add_conciliacion_for_merge_line(
+            document_id=document_id,
+            merge_line_id=merge_line_id,
+            mode=payload.mode,
+            matched_contrato_line_id=payload.matched_contrato_line_id,
+            precio_unitario=payload.precio_unitario,
+            descripcion=payload.descripcion,
+        )
+        if not ok:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "No se pudo traer la linea de contrato (linea de albaran "
+                    "o de contrato no validas)."
+                ),
+            )
+        return {
+            "ok": True,
+            "document_id": document_id,
+            "merge_line_id": merge_line_id,
+            "matched_contrato_line_id": payload.matched_contrato_line_id,
+        }
+
     @app.exception_handler(KeyError)
     async def key_error_handler(_: Request, exc: KeyError) -> JSONResponse:
         return JSONResponse(status_code=404, content={"detail": str(exc)})

@@ -234,10 +234,49 @@
         if (!btn) return;
         const row = btn.closest("tr.conciliacion-row");
         if (!row) return;
-        const sel = row.querySelector(".js-concilia-select");
-        if (!sel) return;
-        sel.hidden = !sel.hidden;
-        if (!sel.hidden) sel.focus();
+        const combo = row.querySelector(".js-concilia-combo");
+        if (!combo) return;
+        const inp = combo.querySelector(".combo-input");
+        if (inp) { inp.focus(); }
+    });
+
+    // Boton "Borrar" de la fila salmon: elimina DEFINITIVAMENTE la
+    // conciliacion (la salmon desaparece y reaparece el "+"). La linea
+    // deja de contar en el total y no se llevara a Sigrid. DELETE + recarga.
+    linesBody.addEventListener("click", async function (evt) {
+        const btn = evt.target.closest
+            ? evt.target.closest(".js-concilia-remove")
+            : null;
+        if (!btn) return;
+        const row = btn.closest("tr.conciliacion-row");
+        if (!row) return;
+        const vid = row.dataset.forValuationLineId;
+        if (!vid) return;
+        if (!window.confirm(
+            "¿Borrar esta línea? Dejará de contar en el total y no se " +
+            "llevará a Sigrid. Reaparecerá el botón + para volver a traerla."
+        )) return;
+        btn.disabled = true;
+        try {
+            const resp = await fetch(
+                `/api/documents/${documentId}/lines/${vid}/conciliacion`,
+                { method: "DELETE" }
+            );
+            if (!resp.ok) {
+                let msg = "No se pudo borrar la línea.";
+                try {
+                    const j = await resp.json();
+                    if (j && j.detail) msg = j.detail;
+                } catch (e) { /* sin cuerpo JSON */ }
+                window.alert(msg);
+                btn.disabled = false;
+                return;
+            }
+            window.location.reload();
+        } catch (e) {
+            window.alert("Error de red borrando la línea.");
+            btn.disabled = false;
+        }
     });
 
     linesBody.addEventListener("change", async function (evt) {
@@ -274,6 +313,287 @@
             window.location.reload();
         } catch (e) {
             window.alert("Error de red aplicando la conciliacion.");
+            sel.disabled = false;
+        }
+    });
+
+    // --------------------------------------------------------------- //
+    // "Traer linea de contrato" a una linea NO casada (boton + en la
+    // celda del numero). Inyecta una fila salmon con un desplegable de
+    // lineas de contrato (construido del JSON embebido). Al elegir, hace
+    // POST al endpoint by-merge que CREA la valoracion de esa linea con la
+    // linea de contrato elegida (precio del contrato). Recarga al terminar.
+    // --------------------------------------------------------------- //
+    let CONTRATO_LINES = [];
+    try {
+        const _clEl = document.getElementById("contrato-lines-json");
+        if (_clEl) CONTRATO_LINES = JSON.parse(_clEl.textContent || "[]");
+    } catch (e) { CONTRATO_LINES = []; }
+
+    // ----------------------------------------------------------------- //
+    // Combo type-ahead LOCAL para elegir linea de contrato escribiendo
+    // (filtra CONTRATO_LINES por parecido de string, sin red). Reutiliza
+    // el CSS .combo/.combo-panel/.combo-item de los combos proveedor/obra.
+    // No concilia el mismo: al elegir, fija el <select> oculto que le
+    // pasamos y dispara su "change", de modo que los handlers PATCH/POST
+    // existentes siguen siendo los unicos que tocan el backend.
+    // ----------------------------------------------------------------- //
+    function _normLine(s) {
+        return (s == null ? "" : String(s))
+            .toLowerCase()
+            .normalize("NFD")
+            .replace(/[\u0300-\u036f]/g, "");
+    }
+
+    function _scrollActive(panel) {
+        const el = panel.querySelector(".combo-item.active");
+        if (el && el.scrollIntoView) { el.scrollIntoView({ block: "nearest" }); }
+    }
+
+    function makeLineCombo(opts) {
+        // Combo de UNA pieza: casilla que al enfocar/clicar abre un panel
+        // con TODAS las lineas de contrato; al escribir deja solo las que
+        // contienen el texto (sin acentos, por palabras); al elegir, fija
+        // el <select> oculto y dispara su "change" (PATCH/POST intactos).
+        // El panel va FIXED (posicionado por JS) porque la tabla de lineas
+        // tiene scroll horizontal y un panel absoluto se recortaria.
+        const wrap = document.createElement("div");
+        wrap.className = "combo combo-lines";
+        const input = document.createElement("input");
+        input.type = "text";
+        input.className = "combo-input";
+        input.setAttribute("autocomplete", "off");
+        input.placeholder = opts.placeholder ||
+            "Escribe o despliega para elegir linea…";
+        const panel = document.createElement("div");
+        panel.className = "combo-panel";
+        panel.hidden = true;
+        wrap.appendChild(input);
+        wrap.appendChild(panel);
+
+        let shown = [];
+        let activeIdx = -1;
+        let repos = null;
+
+        function place() {
+            const r = input.getBoundingClientRect();
+            panel.style.top = (r.bottom + 4) + "px";
+            panel.style.left = r.left + "px";
+            panel.style.minWidth = Math.max(r.width, 360) + "px";
+            panel.style.maxWidth = "720px";
+        }
+
+        function close() {
+            panel.hidden = true;
+            activeIdx = -1;
+            if (repos) {
+                window.removeEventListener("scroll", repos, true);
+                window.removeEventListener("resize", repos);
+                repos = null;
+            }
+        }
+
+        function pick(item) {
+            input.value = item.label;
+            close();
+            opts.onPick(item.value);
+        }
+
+        function render() {
+            panel.innerHTML = "";
+            if (!shown.length) {
+                const d = document.createElement("div");
+                d.className = "combo-msg";
+                d.textContent = "Sin coincidencias";
+                panel.appendChild(d);
+            } else {
+                shown.forEach(function (it, i) {
+                    const d = document.createElement("div");
+                    d.className =
+                        "combo-item" + (i === activeIdx ? " active" : "");
+                    d.textContent = it.label;
+                    d.addEventListener("mousedown", function (e) {
+                        e.preventDefault();
+                        pick(it);
+                    });
+                    panel.appendChild(d);
+                });
+            }
+            panel.hidden = false;
+            place();
+            if (!repos) {
+                repos = function () { close(); };
+                window.addEventListener("scroll", repos, true);
+                window.addEventListener("resize", repos);
+            }
+        }
+
+        function open() {
+            const tokens = _normLine(input.value).split(/\s+/).filter(Boolean);
+            const matches = (opts.lines || []).filter(function (l) {
+                if (!tokens.length) { return true; }
+                const nl = _normLine(l.label);
+                return tokens.every(function (t) { return nl.indexOf(t) !== -1; });
+            }).map(function (l) {
+                return { value: String(l.id), label: l.label };
+            });
+            shown = [];
+            if (opts.nuevaValue) {
+                shown.push({
+                    value: opts.nuevaValue,
+                    label: opts.nuevaLabel || "➕ Nueva",
+                });
+            }
+            shown = shown.concat(matches);
+            activeIdx = -1;
+            render();
+        }
+
+        input.addEventListener("focus", open);
+        input.addEventListener("click", open);
+        input.addEventListener("input", open);
+        input.addEventListener("keydown", function (e) {
+            if (panel.hidden) {
+                if (e.key === "ArrowDown" || e.key === "Enter") { open(); }
+                return;
+            }
+            if (e.key === "ArrowDown") {
+                e.preventDefault();
+                activeIdx = Math.min(activeIdx + 1, shown.length - 1);
+                render(); _scrollActive(panel);
+            } else if (e.key === "ArrowUp") {
+                e.preventDefault();
+                activeIdx = Math.max(activeIdx - 1, 0);
+                render(); _scrollActive(panel);
+            } else if (e.key === "Enter") {
+                e.preventDefault();
+                if (activeIdx >= 0 && shown[activeIdx]) { pick(shown[activeIdx]); }
+            } else if (e.key === "Escape") {
+                close();
+            }
+        });
+        document.addEventListener("click", function (e) {
+            if (!wrap.contains(e.target)) { close(); }
+        });
+        return wrap;
+    }
+
+    // Monta el combo de busqueda en TODAS las filas salmon ya conciliadas
+    // (sustituye el <select> de cambiar conciliacion, que queda oculto como
+    // contenedor de valor). Asi cada linea salmon tiene su casilla.
+    function initConciliaCombos() {
+        const sels = document.querySelectorAll(".js-concilia-select");
+        Array.prototype.forEach.call(sels, function (sel) {
+            if (sel.dataset.comboReady) { return; }
+            sel.dataset.comboReady = "1";
+            sel.hidden = true;
+            const combo = makeLineCombo({
+                lines: CONTRATO_LINES,
+                nuevaValue: "nueva",
+                nuevaLabel: "➕ Nueva (derivar a la partida)",
+                onPick: function (value) {
+                    sel.value = value;
+                    sel.dispatchEvent(new Event("change", { bubbles: true }));
+                },
+            });
+            combo.classList.add("js-concilia-combo");
+            sel.insertAdjacentElement("beforebegin", combo);
+        });
+    }
+    initConciliaCombos();
+
+    linesBody.addEventListener("click", function (evt) {
+        const btn = evt.target.closest ? evt.target.closest(".js-add-concilia") : null;
+        if (!btn) return;
+        const tr = btn.closest("tr");
+        if (!tr) return;
+        const mergeId = tr.dataset.lineId;
+        if (!mergeId) return;
+        // Toggle: si ya hay una fila "add" justo debajo, la quitamos.
+        const next = tr.nextElementSibling;
+        if (next && next.classList.contains("concilia-add")) { next.remove(); return; }
+
+        const row = document.createElement("tr");
+        row.className = "conciliacion-row concilia-add";
+        const td1 = document.createElement("td");
+        td1.className = "concilia-td";
+        const badge = document.createElement("span");
+        badge.className = "concilia-badge concilia-badge-assigned";
+        badge.textContent = "Traer";
+        td1.appendChild(badge);
+        const td2 = document.createElement("td");
+        td2.className = "concilia-td";
+        td2.colSpan = 9;
+        const sel = document.createElement("select");
+        sel.className = "concilia-select js-add-concilia-select";
+        sel.dataset.mergeId = mergeId;
+        const opt0 = document.createElement("option");
+        opt0.value = ""; opt0.disabled = true; opt0.selected = true;
+        opt0.textContent = "— elegir línea de contrato —";
+        sel.appendChild(opt0);
+        // Opcion "Nueva": copia la linea blanca del albaran (salmon Nueva,
+        // como si la hubiera generado el valorador sin match de contrato).
+        const optNueva = document.createElement("option");
+        optNueva.value = "__nueva__";
+        optNueva.textContent = "➕ Nueva (copiar línea del albarán)";
+        sel.appendChild(optNueva);
+        if (!CONTRATO_LINES.length) {
+            const o = document.createElement("option");
+            o.value = ""; o.disabled = true;
+            o.textContent = "(sin lineas de contrato; selecciona un contrato primero)";
+            sel.appendChild(o);
+        }
+        CONTRATO_LINES.forEach(function (cl) {
+            const o = document.createElement("option");
+            o.value = String(cl.id);
+            o.textContent = cl.label;
+            sel.appendChild(o);
+        });
+        sel.hidden = true;  // contenedor de valor
+        const addCombo = makeLineCombo({
+            lines: CONTRATO_LINES,
+            nuevaValue: "__nueva__",
+            nuevaLabel: "➕ Nueva (copiar línea del albarán)",
+            onPick: function (value) {
+                sel.value = value;
+                sel.dispatchEvent(new Event("change", { bubbles: true }));
+            },
+        });
+        td2.appendChild(addCombo);
+        td2.appendChild(sel);
+        row.appendChild(td1);
+        row.appendChild(td2);
+        tr.insertAdjacentElement("afterend", row);
+        addCombo.querySelector(".combo-input").focus();
+    });
+
+    linesBody.addEventListener("change", async function (evt) {
+        const sel = evt.target.closest ? evt.target.closest(".js-add-concilia-select") : null;
+        if (!sel) return;
+        const mergeId = sel.dataset.mergeId;
+        const value = sel.value;
+        if (!mergeId || !value) return;
+        const body = (value === "__nueva__")
+            ? { mode: "nueva" }
+            : { mode: "contract_line", matched_contrato_line_id: Number(value) };
+        sel.disabled = true;
+        try {
+            const resp = await fetch(
+                `/api/documents/${documentId}/lines/by-merge/${mergeId}/conciliacion`,
+                {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(body),
+                }
+            );
+            if (!resp.ok) {
+                let msg = "No se pudo traer la linea de contrato.";
+                try { const j = await resp.json(); if (j && j.detail) msg = j.detail; } catch (e) {}
+                window.alert(msg); sel.disabled = false; return;
+            }
+            window.location.reload();
+        } catch (e) {
+            window.alert("Error de red trayendo la linea de contrato.");
             sel.disabled = false;
         }
     });
@@ -429,6 +749,22 @@
         }
         return (nombre || "Sin nombre") + (val ? " — " + val : "");
     }
+    // Puntuacion de coincidencia texto extraido (IA) vs nombre de Sigrid.
+    // 1.0 si uno contiene al otro; si no, fraccion de tokens (>=3 letras)
+    // del texto que aparecen en el candidato. Ambos normalizados.
+    function _matchScore(qNorm, candNorm) {
+        if (!qNorm || !candNorm) return 0;
+        if (candNorm.indexOf(qNorm) !== -1 || qNorm.indexOf(candNorm) !== -1) {
+            return 1;
+        }
+        const toks = qNorm.split(/\s+/).filter(function (t) {
+            return t.length >= 3;
+        });
+        if (!toks.length) return 0;
+        let hits = 0;
+        toks.forEach(function (t) { if (candNorm.indexOf(t) !== -1) hits++; });
+        return hits / toks.length;
+    }
 
     function initCombo(combo) {
         const input = combo.querySelector(".combo-input");
@@ -493,12 +829,12 @@
             combo.dataset.label = it.label;
             close();
         }
-        async function ensureLoaded() {
+        async function ensureLoaded(silent) {
             const key = obraInputId ? (currentObra() || "_") : "_";
             if (loading) return;
             if (loadedKey === key && items.length) return;
             loading = true; loadedKey = key;
-            msg("Cargando de Sigrid…");
+            if (!silent) msg("Cargando de Sigrid…");
             let url = endpoint;
             if (obraInputId) url += "?obra=" + encodeURIComponent(currentObra());
             try {
@@ -507,7 +843,7 @@
                 loading = false;
                 if (!data || !data.ok) {
                     items = []; loadedKey = null;
-                    msg("⚠ " + ((data && data.error) || "Sigrid no disponible"), "combo-error");
+                    if (!silent) msg("⚠ " + ((data && data.error) || "Sigrid no disponible"), "combo-error");
                     return;
                 }
                 items = (data.items || []).map(function (it) {
@@ -516,10 +852,10 @@
                     const label = _comboLabel(kind, val, nombre);
                     return { val: val, nombre: nombre, label: label, norm: _norm(label) };
                 });
-                applyFilter();
+                if (!silent) applyFilter();
             } catch (e) {
                 loading = false; items = []; loadedKey = null;
-                msg("⚠ Error de red consultando Sigrid", "combo-error");
+                if (!silent) msg("⚠ Error de red consultando Sigrid", "combo-error");
             }
         }
 
@@ -528,6 +864,11 @@
             ensureLoaded();
         });
         input.addEventListener("input", function () {
+            if (combo.dataset.suggested) {
+                combo.classList.remove("combo-suggested");
+                delete combo.dataset.suggested;
+                input.removeAttribute("title");
+            }
             if (items.length || loading) applyFilter();
             else ensureLoaded();
         });
@@ -554,9 +895,62 @@
                 if (combo.dataset.label != null) input.value = combo.dataset.label;
             }, 150);
         });
+
+        // Propuesta por coincidencia de texto: cuando la IA no localizo
+        // bien el codigo de obra / CIF, usamos el nombre extraido para
+        // proponer la mejor coincidencia de Sigrid (misma lista que el
+        // desplegable), dejandola pre-seleccionada y marcada "sugerido".
+        combo._proposeBest = async function (text) {
+            const vEl2 = document.getElementById(valInputId);
+            if (vEl2 && (vEl2.value || "").trim()) return false;  // no pisar
+            const q = _norm(text || "");
+            if (!q) return false;
+            await ensureLoaded(true);   // carga silenciosa (sin abrir panel)
+            if (!items.length) return false;
+            let best = null, bestScore = 0;
+            items.forEach(function (it) {
+                const s = _matchScore(q, _norm(it.nombre || ""));
+                if (s > bestScore) { bestScore = s; best = it; }
+            });
+            if (best && bestScore >= 0.5) {
+                choose(best);
+                combo.classList.add("combo-suggested");
+                combo.dataset.suggested = "1";
+                input.title = "Sugerido por coincidencia de texto — verificalo";
+                return true;
+            }
+            return false;
+        };
     }
 
-    document.querySelectorAll(".combo").forEach(initCombo);
+    // Excluimos los combos de lineas de contrato (.combo-lines): son
+    // LOCALES (filtran CONTRATO_LINES en memoria) y NO deben pasar por
+    // initCombo, que hace fetch a Sigrid y mostraba "Sigrid no disponible".
+    document.querySelectorAll(".combo:not(.combo-lines)").forEach(initCombo);
+
+    // Al cargar: si la IA no fijo el codigo de obra / CIF del proveedor,
+    // proponer por coincidencia de texto. El proveedor depende de la obra
+    // (sus contratos), asi que se resuelve primero la obra.
+    (async function proposeHeaderMatches() {
+        const obraCombo = document.querySelector('.combo[data-kind="obra"]');
+        const provCombo = document.querySelector('.combo[data-kind="proveedor"]');
+        const obraCodigo = document.getElementById("obra_codigo");
+        const obraNombre = document.getElementById("obra_nombre");
+        const provCif = document.getElementById("proveedor_cif");
+        const provNombre = document.getElementById("proveedor_nombre");
+
+        if (obraCombo && obraCombo._proposeBest &&
+            obraCodigo && !(obraCodigo.value || "").trim() &&
+            obraNombre && (obraNombre.value || "").trim()) {
+            try { await obraCombo._proposeBest(obraNombre.value); } catch (_) {}
+        }
+        if (provCombo && provCombo._proposeBest &&
+            obraCodigo && (obraCodigo.value || "").trim() &&
+            provCif && !(provCif.value || "").trim() &&
+            provNombre && (provNombre.value || "").trim()) {
+            try { await provCombo._proposeBest(provNombre.value); } catch (_) {}
+        }
+    })();
 
     function readNumericOrNull(input) {
         if (!input) return null;
@@ -645,7 +1039,10 @@
             const _codimp = readTextOrNull(byField.codigo_imputacion);
             const _concepto = readTextOrNull(byField.concepto);
             const _cantidad = readNumericOrNull(byField.cantidad);
-            const _precio = readNumericOrNull(byField.precio);
+            // La blanca guarda lo leido/escrito por el usuario. El precio
+            // editable de la fila (precio_unitario) ES el precio declarado
+            // del albaran y se guarda en el merge.
+            const _precio = readNumericOrNull(byField.precio_unitario);
             const _descuento = readNumericOrNull(byField.descuento);
             const _importe = readNumericOrNull(byField.importe);
             const _codigo = readTextOrNull(byField.codigo);
@@ -678,23 +1075,10 @@
                 codigo: _codigo,
                 // 'unidad_display' y 'precio_unitario_display' NO se envían.
             });
-
-            // Si una linea BASE se edito (dirty) y tiene valoracion, ademas
-            // del merge enviamos un valuation_line_update para que la
-            // valoracion (albaran_line_valuations) refleje cantidad/unidad/
-            // unitario/importe. Solo si dirty -> no toca lineas intactas.
-            const _vlid = row.dataset.valuationLineId;
-            if (row.dataset.dirty === "1" && _vlid) {
-                valuation_updates.push({
-                    valuation_line_id: Number(_vlid),
-                    codigo_partida_final: _codimp,
-                    descripcion_linea: null,   // preservar (COALESCE en backend)
-                    cantidad_albaran: _cantidad,
-                    unidad_contrato: readTextOrNull(byField.unidad),
-                    precio_unitario_final: readNumericOrNull(byField.precio_unitario),
-                    importe_calculado: _importe,
-                });
-            }
+            // NOTA: las ediciones de la linea blanca van SOLO al merge. Ya
+            // NO se manda valuation_line_update para from_albaran: la
+            // valoracion (fila salmon) la fija la conciliacion con la linea
+            // de contrato, y la blanca nunca debe pisar/ser pisada por ella.
         });
 
         return { merge_lines: merge_lines, valuation_updates: valuation_updates };
@@ -787,6 +1171,48 @@
         valuateStatus.textContent = text;
     }
 
+    // La valoracion es ASINCRONA (sv7 -> sv6 -> sv5 escriben en
+    // albaran_valuations). Tras lanzarla sondeamos el documento hasta
+    // que aparezca una valoracion NUEVA (distinto valuation_id o
+    // created_at_utc que la que habia al cargar la pagina) y entonces
+    // refrescamos. Si tarda demasiado, ofrecemos refresco manual.
+    async function pollUntilValued(baselineId, baselineTs) {
+        const maxTries = 40;       // ~2 min a 3s
+        const intervalMs = 3000;
+        for (let i = 0; i < maxTries; i++) {
+            await new Promise(function (r) { setTimeout(r, intervalMs); });
+            try {
+                const resp = await fetch(
+                    `/api/documents/${documentId}`,
+                    { headers: { "Accept": "application/json" } }
+                );
+                if (!resp.ok) continue;
+                const b = await resp.json();
+                const v = b && b.valuation;
+                if (v && (String(v.valuation_id || "") !== baselineId
+                        || String(v.created_at_utc || "") !== baselineTs)) {
+                    paintValuateStatus(
+                        "ok", "Valoracion completada. Actualizando…"
+                    );
+                    window.location.reload();
+                    return;
+                }
+            } catch (_) { /* reintenta en el siguiente ciclo */ }
+        }
+        paintValuateStatus(
+            "ok", "La valoracion esta tardando mas de lo normal."
+        );
+        if (valuateStatus) {
+            const a = document.createElement("a");
+            a.href = "#";
+            a.textContent = " Refrescar ahora";
+            a.addEventListener("click", function (e) {
+                e.preventDefault(); window.location.reload();
+            });
+            valuateStatus.appendChild(a);
+        }
+    }
+
     async function triggerValuate() {
         if (!valuateBtn) return;
 
@@ -842,9 +1268,15 @@
                 paintValuateStatus("error", "Error: " + detail);
                 return;
             }
-            const msg = (body && body.message) ||
-                "Valoración encolada. Refresca en unos segundos.";
-            paintValuateStatus("ok", msg);
+            // Lanzada OK: ahora esperamos (sondeo) a que la valoracion
+            // asincrona termine y refrescamos sola la pagina.
+            const baselineId = (valuateBtn.dataset.currentValId || "");
+            const baselineTs = (valuateBtn.dataset.currentValTs || "");
+            paintValuateStatus(
+                "loading",
+                "Valorando… (esto puede tardar unos segundos)"
+            );
+            await pollUntilValued(baselineId, baselineTs);
         } catch (exc) {
             paintValuateStatus("error", "Error de red: " + (exc && exc.message || exc));
         } finally {
@@ -862,6 +1294,29 @@
             triggerValuate();
         });
     }
+
+    // Valoracion INICIAL en segundo plano: la lanza el pipeline
+    // (sv7 -> sv6 -> sv5) tras asociar el contrato, NO este boton. Si al
+    // abrir el documento aun no hay valoracion pero ya hay un contrato
+    // seleccionado, lo mas probable es que la valoracion inicial este en
+    // curso: sondeamos y avisamos/refrescamos al terminar, sin que el
+    // revisor tenga que pulsar nada. (El camino del boton "Valorar ahora"
+    // sigue igual: sondea tras el click.)
+    (function autoPollInitialValuation() {
+        if (!valuateBtn) return;  // vista no editable: no hay nada que sondear
+        const yaTieneValoracion =
+            (valuateBtn.dataset.currentValId || "").trim() !== "";
+        if (yaTieneValoracion) return;   // ya valorado: no hace falta sondear
+        let codigo = "";
+        try { codigo = collectSelectedContratoCodigo() || ""; } catch (_) {}
+        if (!codigo) return;             // sin contrato: no se espera valoracion
+        paintValuateStatus(
+            "loading",
+            "Valoracion inicial en curso… la pagina se actualizara al terminar."
+        );
+        // baseline vacio: cualquier valoracion que aparezca dispara el refresco.
+        pollUntilValued("", "");
+    })();
 
     // --------------------------------------------------------------- //
     // Re-búsqueda manual de contratos (alert amarillo de "0 contratos")
