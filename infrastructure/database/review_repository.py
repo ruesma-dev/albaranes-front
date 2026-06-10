@@ -893,8 +893,20 @@ class AlbaranReviewRepository:
 
         # Paso 1: agrupar por tipo (matched / derived) con la salida
         # indexada por valuation_line_id.
-        matched_to_vline: dict[int, int] = {}
-        derived_to_vline: dict[int, int] = {}
+        #
+        # IMPORTANTE (fix jun 2026 — líneas que se quedaban sin conciliar):
+        # la relación línea_de_contrato → líneas_de_valoración es UNO-A-VARIOS,
+        # no uno-a-uno. Varias líneas del albarán pueden casar con la MISMA
+        # línea de contrato (p.ej. dos niveles láser idénticos con distinto
+        # nº de serie casan ambos contra la misma línea de Sigrid; o varias
+        # piezas de un mismo sanitario apuntan a la misma partida). Antes
+        # indexábamos ``matched_to_vline[contrato_line_id] = vid`` y la
+        # segunda línea SOBREESCRIBÍA a la primera: solo la última conservaba
+        # su bloque de conciliación y las demás aparecían vacías con el botón
+        # "+". Ahora acumulamos TODOS los valuation_line_id que casan con cada
+        # línea de contrato para pintarles el bloque a todos.
+        matched_to_vlines: dict[int, list[int]] = {}
+        derived_to_vlines: dict[int, list[int]] = {}
         precio_final_by_vline: dict[int, float | None] = {}
         vline_by_vid: dict[int, LineValuationPayload] = {}
         for vline in all_lines:
@@ -904,72 +916,74 @@ class AlbaranReviewRepository:
             precio_final_by_vline[vid] = vline.precio_unitario_final
             vline_by_vid[vid] = vline
             if vline.matched_contrato_line_id is not None:
-                matched_to_vline[vline.matched_contrato_line_id] = vid
+                matched_to_vlines.setdefault(
+                    vline.matched_contrato_line_id, []
+                ).append(vid)
             elif vline.derived_contrato_line_id is not None:
-                derived_to_vline[vline.derived_contrato_line_id] = vid
+                derived_to_vlines.setdefault(
+                    vline.derived_contrato_line_id, []
+                ).append(vid)
 
         out: dict[int, ConciliacionDisplay] = {}
 
         # Paso 2: líneas matched (de Sigrid cacheadas) en bloque.
         for row in self._fetch_contrato_lines_in_session(
-            session, list(matched_to_vline.keys())
+            session, list(matched_to_vlines.keys())
         ):
-            vid = matched_to_vline.get(row["id"])
-            if vid is None:
-                continue
-            unitario = row.get("precio_unitario")
-            precio_final = precio_final_by_vline.get(vid)
-            out[vid] = ConciliacionDisplay(
-                kind="assigned",
-                descripcion=row.get("descripcion_linea"),
-                unitario=unitario,
-                medicion_total=row.get("uds"),
-                medicion_pendiente=row.get("pendiente_servir"),
-                unidad=row.get("unidad_medida"),
-                codigo_partida=row.get("codigo_partida"),
-                descripcion_partida=row.get("descripcion_partida"),
-                price_agreement=self._price_agreement(unitario, precio_final),
-                precio_unitario_final=precio_final,
-                sibling=None,
-                match_method=getattr(vline_by_vid.get(vid), "match_method", None),
-                match_confidence_pct=getattr(
-                    vline_by_vid.get(vid), "match_confidence_pct", None
-                ),
-                precio_unitario_source=getattr(
-                    vline_by_vid.get(vid), "precio_unitario_source", None
-                ),
-            )
+            # Todas las líneas de valoración que casaron con ESTA línea de
+            # contrato reciben su propio bloque de conciliación (uno-a-varios).
+            for vid in matched_to_vlines.get(row["id"], []):
+                unitario = row.get("precio_unitario")
+                precio_final = precio_final_by_vline.get(vid)
+                out[vid] = ConciliacionDisplay(
+                    kind="assigned",
+                    descripcion=row.get("descripcion_linea"),
+                    unitario=unitario,
+                    medicion_total=row.get("uds"),
+                    medicion_pendiente=row.get("pendiente_servir"),
+                    unidad=row.get("unidad_medida"),
+                    codigo_partida=row.get("codigo_partida"),
+                    descripcion_partida=row.get("descripcion_partida"),
+                    price_agreement=self._price_agreement(unitario, precio_final),
+                    precio_unitario_final=precio_final,
+                    sibling=None,
+                    match_method=getattr(vline_by_vid.get(vid), "match_method", None),
+                    match_confidence_pct=getattr(
+                        vline_by_vid.get(vid), "match_confidence_pct", None
+                    ),
+                    precio_unitario_source=getattr(
+                        vline_by_vid.get(vid), "precio_unitario_source", None
+                    ),
+                )
 
         # Paso 3: líneas derived (creadas por el valorador) en bloque.
         for row in self._fetch_derived_lines_in_session(
-            session, list(derived_to_vline.keys())
+            session, list(derived_to_vlines.keys())
         ):
-            vid = derived_to_vline.get(row["id"])
-            if vid is None:
-                continue
-            unitario = row.get("precio_unitario")
-            precio_final = precio_final_by_vline.get(vid)
-            out[vid] = ConciliacionDisplay(
-                kind="derived",
-                descripcion=row.get("descripcion_linea"),
-                unitario=unitario,
-                medicion_total=row.get("uds"),
-                medicion_pendiente=None,  # derived: no hay pendiente
-                unidad=row.get("unidad_medida"),
-                codigo_partida=row.get("codigo_partida"),
-                descripcion_partida=row.get("descripcion_partida"),
-                price_agreement=self._price_agreement(unitario, precio_final),
-                precio_unitario_final=precio_final,
-                sibling=None,
-                match_method=getattr(vline_by_vid.get(vid), "match_method", None),
-                match_confidence_pct=getattr(
-                    vline_by_vid.get(vid), "match_confidence_pct", None
-                ),
-                precio_unitario_source=getattr(
-                    vline_by_vid.get(vid), "precio_unitario_source", None
-                ),
-                derived_origen=row.get("origen"),
-            )
+            for vid in derived_to_vlines.get(row["id"], []):
+                unitario = row.get("precio_unitario")
+                precio_final = precio_final_by_vline.get(vid)
+                out[vid] = ConciliacionDisplay(
+                    kind="derived",
+                    descripcion=row.get("descripcion_linea"),
+                    unitario=unitario,
+                    medicion_total=row.get("uds"),
+                    medicion_pendiente=None,  # derived: no hay pendiente
+                    unidad=row.get("unidad_medida"),
+                    codigo_partida=row.get("codigo_partida"),
+                    descripcion_partida=row.get("descripcion_partida"),
+                    price_agreement=self._price_agreement(unitario, precio_final),
+                    precio_unitario_final=precio_final,
+                    sibling=None,
+                    match_method=getattr(vline_by_vid.get(vid), "match_method", None),
+                    match_confidence_pct=getattr(
+                        vline_by_vid.get(vid), "match_confidence_pct", None
+                    ),
+                    precio_unitario_source=getattr(
+                        vline_by_vid.get(vid), "precio_unitario_source", None
+                    ),
+                    derived_origen=row.get("origen"),
+                )
 
         return out
 
