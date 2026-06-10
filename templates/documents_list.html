@@ -25,6 +25,17 @@
             <strong>{{ result.review_required_count }}</strong>
         </div>
     </div>
+
+    {# Soft-delete (jun 2026): acceso a la papelera (albaranes borrados,
+       restaurables). #}
+    <div class="vista-toggle">
+        {% if filters.vista == 'papelera' %}
+            <a href="/documents?vista=activos" class="btn small secondary">← Volver a activos</a>
+            <span class="muted small">Papelera · {{ result.total }} albarán(es) borrado(s). Puedes restaurarlos.</span>
+        {% else %}
+            <a href="/documents?vista=papelera&approved=all" class="btn small secondary">🗑 Papelera{% if result.trash_count %} ({{ result.trash_count }}){% endif %}</a>
+        {% endif %}
+    </div>
 </section>
 
 <section class="panel">
@@ -95,17 +106,35 @@
             {% for item in result.items %}
                 <tr>
                     <td class="actions-cell sticky-col">
-                        <a href="/documents/{{ item.id }}" class="btn small">Revisar</a>
-                        {% if item.approved %}
-                            <form method="post" action="/documents/{{ item.id }}/unapprove">
+                        {% if filters.vista == 'papelera' %}
+                            <form method="post" action="/documents/{{ item.id }}/restore">
                                 <input type="hidden" name="redirect_query" value="{{ current_query }}">
-                                <button type="submit" class="btn small secondary">Desaprobar</button>
+                                <button type="submit" class="btn small success">Restaurar</button>
+                            </form>
+                            <form method="post" action="/documents/{{ item.id }}/purge"
+                                  onsubmit="return confirm('⚠ BORRADO DEFINITIVO E IRREVERSIBLE.\n\nSe eliminarán para siempre el albarán y TODOS sus datos: líneas, valoración y contratos asociados. Esta acción NO se puede deshacer.\n\n¿Eliminar definitivamente?');">
+                                <input type="hidden" name="redirect_query" value="{{ current_query }}">
+                                <button type="submit" class="btn small danger">Borrar definitivamente</button>
                             </form>
                         {% else %}
-                            <form method="post" action="/documents/{{ item.id }}/approve">
+                            <a href="/documents/{{ item.id }}" class="btn small">Revisar</a>
+                            {% if item.approved %}
+                                <form method="post" action="/documents/{{ item.id }}/unapprove">
+                                    <input type="hidden" name="redirect_query" value="{{ current_query }}">
+                                    <button type="submit" class="btn small secondary">Desaprobar</button>
+                                </form>
+                            {% else %}
+                                <form method="post" action="/documents/{{ item.id }}/approve">
+                                    <input type="hidden" name="redirect_query" value="{{ current_query }}">
+                                    <input type="hidden" name="approved_by" value="">
+                                    <button type="submit" class="btn small success">Aprobar</button>
+                                </form>
+                            {% endif %}
+                            <form method="post" action="/documents/{{ item.id }}/delete"
+                                  onsubmit="return confirm('¿Mover este albarán a la papelera? Podrás restaurarlo después desde la papelera.');">
                                 <input type="hidden" name="redirect_query" value="{{ current_query }}">
-                                <input type="hidden" name="approved_by" value="">
-                                <button type="submit" class="btn small success">Aprobar</button>
+                                <input type="hidden" name="deleted_by" value="">
+                                <button type="submit" class="btn small danger">Borrar</button>
                             </form>
                         {% endif %}
                     </td>

@@ -176,15 +176,84 @@
                 </span>
             </div>
 
-            {% if document.contratos|length == 0 %}
-                <div class="alert warning contrato-empty">
-                    <div class="contrato-empty-text">
-                        No se encontró ningún contrato en el ERP para la combinación
-                        CIF <code>{{ document.proveedor_cif or '—' }}</code> +
-                        obra <code>{{ document.obra_codigo or '—' }}</code>.
-                        Revisa que los valores sean correctos en el bloque de campos de abajo.
+            {# ----------------------------------------------------------------
+               Selector de contrato (jun 2026): combo único con autocompletar
+               (mismo patrón que los desplegables de obra/proveedor) que lista
+               los contratos detectados por CIF+obra MÁS la opción «Sin
+               contrato». Sustituye a los tres bloques anteriores (0 / 1 /
+               varios). El JS (wireContratoCombo) monta el combo sobre
+               #contrato-combo-mount, escribe el código elegido en el hidden
+               #selected_contrato_codigo, muestra la tarjeta del contrato y, al
+               cambiar, GUARDA y RE-VALORA automáticamente (o solo guarda si se
+               elige «Sin contrato»). Cuando el proceso no detectó contrato,
+               el combo arranca en «Sin contrato».
+               ---------------------------------------------------------------- #}
+            {% if document.is_editable %}
+                <div class="contrato-combo-block">
+                    <label class="full-width">
+                        <span>Contrato aplicado · escribe para buscar (incluye «Sin contrato»)</span>
+                        <div id="contrato-combo-mount" class="contrato-combo-mount"></div>
+                    </label>
+                    <input type="hidden" id="selected_contrato_codigo"
+                           value="{{ document.selected_contrato_codigo or '' }}">
+                    <span id="contrato-combo-status" class="valuate-status" hidden></span>
+                </div>
+
+                {# Datos del combo: contratos detectados (código + etiqueta). #}
+                <script id="contratos-combo-data" type="application/json">[
+                {%- for c in document.contratos -%}
+                {"codigo": {{ c.codigo_contrato | tojson }}, "label": {{ (c.codigo_contrato ~ ' — ' ~ (c.nombre_contrato or c.codigo_contrato)) | tojson }}}{{ "," if not loop.last else "" }}
+                {%- endfor -%}
+                ]</script>
+
+                {# Tarjeta(s) de detalle: una por contrato; visible solo la
+                   elegida (lo gestiona el JS al cambiar el combo). #}
+                {% for c in document.contratos %}
+                    {% set is_selected = c.codigo_contrato == document.selected_contrato_codigo %}
+                    <div class="contrato-card js-contrato-card"
+                         data-codigo="{{ c.codigo_contrato }}"
+                         style="{% if not is_selected %}display:none;{% endif %}">
+                        <div class="contrato-scroll">
+                            <div class="contrato-grid">
+                                <div>
+                                    <dt>Código</dt>
+                                    <dd><code>{{ c.codigo_contrato }}</code></dd>
+                                </div>
+                                <div class="contrato-nombre">
+                                    <dt>Nombre</dt>
+                                    <dd>{{ c.nombre_contrato or '—' }}</dd>
+                                </div>
+                                <div>
+                                    <dt>Fecha alta</dt>
+                                    <dd>{{ c.fecha_alta_contrato | fecha_int_iso }}</dd>
+                                </div>
+                                <div>
+                                    <dt>Importe total</dt>
+                                    <dd>{{ c.importe_total | importe_eur }}</dd>
+                                </div>
+                            </div>
+                            {% if not c.pdf_sharepoint_web_url %}
+                                <div class="contrato-actions">
+                                    <span class="contrato-no-pdf muted small">
+                                        Sin PDF del contrato disponible
+                                    </span>
+                                </div>
+                            {% endif %}
+                        </div>
                     </div>
-                    {% if document.is_editable %}
+                {% endfor %}
+
+                {# Sin contrato detectado: avisamos y ofrecemos re-buscar tras
+                   corregir CIF/obra. El combo queda en «Sin contrato». #}
+                {% if document.contratos|length == 0 %}
+                    <div class="alert warning contrato-empty">
+                        <div class="contrato-empty-text">
+                            No se encontró ningún contrato en el ERP para la combinación
+                            CIF <code>{{ document.proveedor_cif or '—' }}</code> +
+                            obra <code>{{ document.obra_codigo or '—' }}</code>.
+                            Este albarán queda <strong>sin contrato</strong>. Si crees que
+                            debería tener uno, corrige CIF u obra más abajo y vuelve a buscar.
+                        </div>
                         <div class="contrato-empty-actions">
                             <button type="button"
                                     class="btn success small"
@@ -198,107 +267,30 @@
                                     title="Solo re-consulta el ERP sin guardar nada">
                                 Solo volver a buscar
                             </button>
-                            <span class="contrato-empty-hint muted small">
-                                Edita CIF u obra más abajo y pulsa
-                                <em>Guardar y volver a buscar</em>.
-                            </span>
                         </div>
                         <div id="refetch-status" class="refetch-status" hidden></div>
-                    {% endif %}
-                </div>
-            {% elif document.contratos|length == 1 %}
-                {% set c = document.contratos[0] %}
-                <div class="contrato-card" data-codigo="{{ c.codigo_contrato }}">
-                    <div class="contrato-scroll">
-                        <div class="contrato-grid">
-                            <div>
-                                <dt>Código</dt>
-                                <dd><code>{{ c.codigo_contrato }}</code></dd>
-                            </div>
-                            <div class="contrato-nombre">
-                                <dt>Nombre</dt>
-                                <dd>{{ c.nombre_contrato or '—' }}</dd>
-                            </div>
-                            <div>
-                                <dt>Fecha alta</dt>
-                                <dd>{{ c.fecha_alta_contrato | fecha_int_iso }}</dd>
-                            </div>
-                            <div>
-                                <dt>Importe total</dt>
-                                <dd>{{ c.importe_total | importe_eur }}</dd>
-                            </div>
-                        </div>
-                        {% if not c.pdf_sharepoint_web_url %}
-                            <div class="contrato-actions">
-                                <span class="contrato-no-pdf muted small">
-                                    Sin PDF del contrato disponible
-                                </span>
-                            </div>
-                        {% endif %}
                     </div>
-                </div>
-                {% if document.is_editable %}
-                    <input type="hidden" id="selected_contrato_codigo" value="{{ c.codigo_contrato }}">
                 {% endif %}
             {% else %}
-                <div class="contrato-multi">
-                    {% if document.is_editable %}
-                        <label class="full-width">
-                            <span>Selecciona el contrato a aplicar</span>
-                            <select id="selected_contrato_codigo" class="contrato-select">
-                                <option value="" {% if not document.selected_contrato_codigo %}selected{% endif %}>
-                                    — Selecciona un contrato —
-                                </option>
-                                {% for c in document.contratos %}
-                                    <option value="{{ c.codigo_contrato }}"
-                                        {% if c.codigo_contrato == document.selected_contrato_codigo %}selected{% endif %}>
-                                        {{ c.nombre_contrato or c.codigo_contrato }}
-                                    </option>
-                                {% endfor %}
-                            </select>
-                        </label>
-                    {% else %}
-                        <div class="muted small">
-                            Cambia a la vista <strong>{{ view_label('merge') }}</strong>
-                            para elegir otro contrato.
-                        </div>
-                    {% endif %}
-
+                {# Vista read-only (proveedor): contrato aplicado, sin editar. #}
+                {% if document.selected_contrato_codigo %}
                     {% for c in document.contratos %}
-                        {% set is_selected = c.codigo_contrato == document.selected_contrato_codigo %}
-                        <div class="contrato-card js-contrato-card"
-                             data-codigo="{{ c.codigo_contrato }}"
-                             style="{% if not is_selected %}display:none;{% endif %}">
-                            <div class="contrato-scroll">
-                                <div class="contrato-grid">
-                                    <div>
-                                        <dt>Código</dt>
-                                        <dd><code>{{ c.codigo_contrato }}</code></dd>
-                                    </div>
-                                    <div class="contrato-nombre">
-                                        <dt>Nombre</dt>
-                                        <dd>{{ c.nombre_contrato or '—' }}</dd>
-                                    </div>
-                                    <div>
-                                        <dt>Fecha alta</dt>
-                                        <dd>{{ c.fecha_alta_contrato | fecha_int_iso }}</dd>
-                                    </div>
-                                    <div>
-                                        <dt>Importe total</dt>
-                                        <dd>{{ c.importe_total | importe_eur }}</dd>
+                        {% if c.codigo_contrato == document.selected_contrato_codigo %}
+                            <div class="contrato-card" data-codigo="{{ c.codigo_contrato }}">
+                                <div class="contrato-scroll">
+                                    <div class="contrato-grid">
+                                        <div><dt>Código</dt><dd><code>{{ c.codigo_contrato }}</code></dd></div>
+                                        <div class="contrato-nombre"><dt>Nombre</dt><dd>{{ c.nombre_contrato or '—' }}</dd></div>
+                                        <div><dt>Fecha alta</dt><dd>{{ c.fecha_alta_contrato | fecha_int_iso }}</dd></div>
+                                        <div><dt>Importe total</dt><dd>{{ c.importe_total | importe_eur }}</dd></div>
                                     </div>
                                 </div>
-                                {% if not c.pdf_sharepoint_web_url %}
-                                    <div class="contrato-actions">
-                                        <span class="contrato-no-pdf muted small">
-                                            Sin PDF del contrato disponible
-                                        </span>
-                                    </div>
-                                {% endif %}
                             </div>
-                        </div>
+                        {% endif %}
                     {% endfor %}
-                </div>
+                {% else %}
+                    <div class="muted small">Sin contrato aplicado.</div>
+                {% endif %}
             {% endif %}
 
             {# Botón "Valorar ahora": tras localizar/seleccionar el contrato

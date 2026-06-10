@@ -132,6 +132,13 @@ class AlbaranReviewRepository:
             "ALTER TABLE albaran_documents_merge ADD COLUMN IF NOT EXISTS last_modified_at_utc VARCHAR(64)",
             "ALTER TABLE albaran_documents_merge ADD COLUMN IF NOT EXISTS review_notes TEXT",
             "ALTER TABLE albaran_documents_merge ADD COLUMN IF NOT EXISTS selected_contrato_codigo VARCHAR(64)",
+            # Soft-delete (jun 2026). Defensa idempotente: normalmente las crea
+            # sv3 (dueño del schema), pero si sv4 arranca primero en local, las
+            # añadimos aquí para poder borrar/restaurar sin esperar a sv3. El
+            # índice único parcial lo gobierna sv3.
+            "ALTER TABLE albaran_documents_merge ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT true",
+            "ALTER TABLE albaran_documents_merge ADD COLUMN IF NOT EXISTS deleted_at_utc VARCHAR(64)",
+            "ALTER TABLE albaran_documents_merge ADD COLUMN IF NOT EXISTS deleted_by VARCHAR(255)",
             "ALTER TABLE albaran_contratos_merge ADD COLUMN IF NOT EXISTS gra_rep_ide INTEGER",
             (
                 "ALTER TABLE albaran_contratos_merge "
@@ -236,17 +243,27 @@ class AlbaranReviewRepository:
 
             approved_count = session.scalar(
                 select(func.count()).select_from(AlbaranDocumentMergeOrm).where(
-                    AlbaranDocumentMergeOrm.approved.is_(True)
+                    AlbaranDocumentMergeOrm.approved.is_(True),
+                    AlbaranDocumentMergeOrm.is_active.is_(True),
                 )
             ) or 0
             pending_count = session.scalar(
                 select(func.count()).select_from(AlbaranDocumentMergeOrm).where(
-                    AlbaranDocumentMergeOrm.approved.is_(False)
+                    AlbaranDocumentMergeOrm.approved.is_(False),
+                    AlbaranDocumentMergeOrm.is_active.is_(True),
                 )
             ) or 0
             review_required_count = session.scalar(
                 select(func.count()).select_from(AlbaranDocumentMergeOrm).where(
-                    AlbaranDocumentMergeOrm.review_required.is_(True)
+                    AlbaranDocumentMergeOrm.review_required.is_(True),
+                    AlbaranDocumentMergeOrm.is_active.is_(True),
+                )
+            ) or 0
+            # Soft-delete (jun 2026): nº de albaranes en la papelera, para
+            # el contador del enlace.
+            trash_count = session.scalar(
+                select(func.count()).select_from(AlbaranDocumentMergeOrm).where(
+                    AlbaranDocumentMergeOrm.is_active.is_(False)
                 )
             ) or 0
 
@@ -310,6 +327,7 @@ class AlbaranReviewRepository:
             approved_count=int(approved_count),
             pending_count=int(pending_count),
             review_required_count=int(review_required_count),
+            trash_count=int(trash_count),
         )
 
     def _compute_and_persist_confianza(
@@ -893,20 +911,8 @@ class AlbaranReviewRepository:
 
         # Paso 1: agrupar por tipo (matched / derived) con la salida
         # indexada por valuation_line_id.
-        #
-        # IMPORTANTE (fix jun 2026 — líneas que se quedaban sin conciliar):
-        # la relación línea_de_contrato → líneas_de_valoración es UNO-A-VARIOS,
-        # no uno-a-uno. Varias líneas del albarán pueden casar con la MISMA
-        # línea de contrato (p.ej. dos niveles láser idénticos con distinto
-        # nº de serie casan ambos contra la misma línea de Sigrid; o varias
-        # piezas de un mismo sanitario apuntan a la misma partida). Antes
-        # indexábamos ``matched_to_vline[contrato_line_id] = vid`` y la
-        # segunda línea SOBREESCRIBÍA a la primera: solo la última conservaba
-        # su bloque de conciliación y las demás aparecían vacías con el botón
-        # "+". Ahora acumulamos TODOS los valuation_line_id que casan con cada
-        # línea de contrato para pintarles el bloque a todos.
-        matched_to_vlines: dict[int, list[int]] = {}
-        derived_to_vlines: dict[int, list[int]] = {}
+        matched_to_vline: dict[int, int] = {}
+        derived_to_vline: dict[int, int] = {}
         precio_final_by_vline: dict[int, float | None] = {}
         vline_by_vid: dict[int, LineValuationPayload] = {}
         for vline in all_lines:
@@ -916,74 +922,72 @@ class AlbaranReviewRepository:
             precio_final_by_vline[vid] = vline.precio_unitario_final
             vline_by_vid[vid] = vline
             if vline.matched_contrato_line_id is not None:
-                matched_to_vlines.setdefault(
-                    vline.matched_contrato_line_id, []
-                ).append(vid)
+                matched_to_vline[vline.matched_contrato_line_id] = vid
             elif vline.derived_contrato_line_id is not None:
-                derived_to_vlines.setdefault(
-                    vline.derived_contrato_line_id, []
-                ).append(vid)
+                derived_to_vline[vline.derived_contrato_line_id] = vid
 
         out: dict[int, ConciliacionDisplay] = {}
 
         # Paso 2: líneas matched (de Sigrid cacheadas) en bloque.
         for row in self._fetch_contrato_lines_in_session(
-            session, list(matched_to_vlines.keys())
+            session, list(matched_to_vline.keys())
         ):
-            # Todas las líneas de valoración que casaron con ESTA línea de
-            # contrato reciben su propio bloque de conciliación (uno-a-varios).
-            for vid in matched_to_vlines.get(row["id"], []):
-                unitario = row.get("precio_unitario")
-                precio_final = precio_final_by_vline.get(vid)
-                out[vid] = ConciliacionDisplay(
-                    kind="assigned",
-                    descripcion=row.get("descripcion_linea"),
-                    unitario=unitario,
-                    medicion_total=row.get("uds"),
-                    medicion_pendiente=row.get("pendiente_servir"),
-                    unidad=row.get("unidad_medida"),
-                    codigo_partida=row.get("codigo_partida"),
-                    descripcion_partida=row.get("descripcion_partida"),
-                    price_agreement=self._price_agreement(unitario, precio_final),
-                    precio_unitario_final=precio_final,
-                    sibling=None,
-                    match_method=getattr(vline_by_vid.get(vid), "match_method", None),
-                    match_confidence_pct=getattr(
-                        vline_by_vid.get(vid), "match_confidence_pct", None
-                    ),
-                    precio_unitario_source=getattr(
-                        vline_by_vid.get(vid), "precio_unitario_source", None
-                    ),
-                )
+            vid = matched_to_vline.get(row["id"])
+            if vid is None:
+                continue
+            unitario = row.get("precio_unitario")
+            precio_final = precio_final_by_vline.get(vid)
+            out[vid] = ConciliacionDisplay(
+                kind="assigned",
+                descripcion=row.get("descripcion_linea"),
+                unitario=unitario,
+                medicion_total=row.get("uds"),
+                medicion_pendiente=row.get("pendiente_servir"),
+                unidad=row.get("unidad_medida"),
+                codigo_partida=row.get("codigo_partida"),
+                descripcion_partida=row.get("descripcion_partida"),
+                price_agreement=self._price_agreement(unitario, precio_final),
+                precio_unitario_final=precio_final,
+                sibling=None,
+                match_method=getattr(vline_by_vid.get(vid), "match_method", None),
+                match_confidence_pct=getattr(
+                    vline_by_vid.get(vid), "match_confidence_pct", None
+                ),
+                precio_unitario_source=getattr(
+                    vline_by_vid.get(vid), "precio_unitario_source", None
+                ),
+            )
 
         # Paso 3: líneas derived (creadas por el valorador) en bloque.
         for row in self._fetch_derived_lines_in_session(
-            session, list(derived_to_vlines.keys())
+            session, list(derived_to_vline.keys())
         ):
-            for vid in derived_to_vlines.get(row["id"], []):
-                unitario = row.get("precio_unitario")
-                precio_final = precio_final_by_vline.get(vid)
-                out[vid] = ConciliacionDisplay(
-                    kind="derived",
-                    descripcion=row.get("descripcion_linea"),
-                    unitario=unitario,
-                    medicion_total=row.get("uds"),
-                    medicion_pendiente=None,  # derived: no hay pendiente
-                    unidad=row.get("unidad_medida"),
-                    codigo_partida=row.get("codigo_partida"),
-                    descripcion_partida=row.get("descripcion_partida"),
-                    price_agreement=self._price_agreement(unitario, precio_final),
-                    precio_unitario_final=precio_final,
-                    sibling=None,
-                    match_method=getattr(vline_by_vid.get(vid), "match_method", None),
-                    match_confidence_pct=getattr(
-                        vline_by_vid.get(vid), "match_confidence_pct", None
-                    ),
-                    precio_unitario_source=getattr(
-                        vline_by_vid.get(vid), "precio_unitario_source", None
-                    ),
-                    derived_origen=row.get("origen"),
-                )
+            vid = derived_to_vline.get(row["id"])
+            if vid is None:
+                continue
+            unitario = row.get("precio_unitario")
+            precio_final = precio_final_by_vline.get(vid)
+            out[vid] = ConciliacionDisplay(
+                kind="derived",
+                descripcion=row.get("descripcion_linea"),
+                unitario=unitario,
+                medicion_total=row.get("uds"),
+                medicion_pendiente=None,  # derived: no hay pendiente
+                unidad=row.get("unidad_medida"),
+                codigo_partida=row.get("codigo_partida"),
+                descripcion_partida=row.get("descripcion_partida"),
+                price_agreement=self._price_agreement(unitario, precio_final),
+                precio_unitario_final=precio_final,
+                sibling=None,
+                match_method=getattr(vline_by_vid.get(vid), "match_method", None),
+                match_confidence_pct=getattr(
+                    vline_by_vid.get(vid), "match_confidence_pct", None
+                ),
+                precio_unitario_source=getattr(
+                    vline_by_vid.get(vid), "precio_unitario_source", None
+                ),
+                derived_origen=row.get("origen"),
+            )
 
         return out
 
@@ -2180,6 +2184,131 @@ class AlbaranReviewRepository:
                 document.approved_by = None
             session.commit()
 
+    # ------------------------------------------------------------------ #
+    # Soft-delete (jun 2026): borrar / restaurar desde la portada.
+    #
+    # Borrar = is_active=False (el albarán desaparece de la portada y deja
+    # de bloquear el dedup en sv3, que prefiltra por is_active). NO se tocan
+    # líneas, valoración ni contratos: cuelgan de la cabecera por FK y se
+    # ocultan con ella, de modo que restaurar lo deja exactamente como
+    # estaba. Reversible y auditable (deleted_at_utc / deleted_by).
+    # ------------------------------------------------------------------ #
+    def soft_delete_document(
+        self,
+        *,
+        document_id: str,
+        deleted_by: str | None,
+    ) -> None:
+        self.initialize()
+        with self._session_factory.create_session() as session:
+            document = session.get(AlbaranDocumentMergeOrm, document_id)
+            if document is None:
+                raise KeyError(f"Documento no encontrado: {document_id}")
+            document.is_active = False
+            document.deleted_at_utc = self._utc_iso()
+            document.deleted_by = self._clean_text(deleted_by)
+            document.last_modified_at_utc = self._utc_iso()
+            session.commit()
+
+    def restore_document(self, *, document_id: str) -> None:
+        self.initialize()
+        with self._session_factory.create_session() as session:
+            document = session.get(AlbaranDocumentMergeOrm, document_id)
+            if document is None:
+                raise KeyError(f"Documento no encontrado: {document_id}")
+            document.is_active = True
+            document.deleted_at_utc = None
+            document.deleted_by = None
+            document.last_modified_at_utc = self._utc_iso()
+            session.commit()
+
+    # ------------------------------------------------------------------ #
+    # Hard-delete (jun 2026): purga DEFINITIVA desde la papelera.
+    #
+    # Borra físicamente el albarán y TODO lo que cuelga de él. No nos
+    # fiamos del ON DELETE CASCADE (existe en las tablas de valoración de
+    # sv6 hacia albaran_documents_merge, pero no necesariamente en líneas
+    # merge / contratos): borramos EXPLÍCITAMENTE en orden hijos→padres,
+    # en una sola transacción y tolerando que alguna tabla no exista
+    # (to_regclass), de modo que el orden de despliegue no rompa la purga.
+    #
+    # Incluye además la tabla cruda por-proveedor (albaran_documents /
+    # albaran_lines) por source_sha256, para no dejar rastro. OJO: cruza
+    # los schemas de sv3 (cruda/contratos) y sv6 (valoración); es pragmático
+    # porque sv4 ya lee esas tablas y comparten BBDD.
+    # ------------------------------------------------------------------ #
+    def hard_delete_document(self, *, document_id: str) -> None:
+        self.initialize()
+        with self._session_factory.create_session() as session:
+            document = session.get(AlbaranDocumentMergeOrm, document_id)
+            if document is None:
+                raise KeyError(f"Documento no encontrado: {document_id}")
+            source_sha256 = document.source_sha256
+
+            # Plan por document_id (merge), de hijos a padres.
+            plan_by_doc: list[tuple[str, str]] = [
+                (
+                    "contrato_lines_derived",
+                    "DELETE FROM contrato_lines_derived "
+                    "WHERE source_document_id = :id",
+                ),
+                (
+                    "albaran_line_valuations",
+                    "DELETE FROM albaran_line_valuations WHERE valuation_id IN "
+                    "(SELECT id FROM albaran_valuations WHERE document_id = :id)",
+                ),
+                (
+                    "albaran_valuations",
+                    "DELETE FROM albaran_valuations WHERE document_id = :id",
+                ),
+                (
+                    "albaran_contrato_lines_merge",
+                    "DELETE FROM albaran_contrato_lines_merge WHERE contrato_id IN "
+                    "(SELECT id FROM albaran_contratos_merge WHERE document_id = :id)",
+                ),
+                (
+                    "albaran_contratos_merge",
+                    "DELETE FROM albaran_contratos_merge WHERE document_id = :id",
+                ),
+                (
+                    "albaran_lines_merge",
+                    "DELETE FROM albaran_lines_merge WHERE document_id = :id",
+                ),
+                (
+                    "albaran_documents_merge",
+                    "DELETE FROM albaran_documents_merge WHERE id = :id",
+                ),
+            ]
+            # Plan de la tabla cruda por-proveedor, por source_sha256.
+            plan_by_sha: list[tuple[str, str]] = [
+                (
+                    "albaran_lines",
+                    "DELETE FROM albaran_lines WHERE document_id IN "
+                    "(SELECT id FROM albaran_documents WHERE source_sha256 = :sha)",
+                ),
+                (
+                    "albaran_documents",
+                    "DELETE FROM albaran_documents WHERE source_sha256 = :sha",
+                ),
+            ]
+
+            def _table_exists(table: str) -> bool:
+                return session.scalar(
+                    text("SELECT to_regclass(:qualified)"),
+                    {"qualified": f"public.{table}"},
+                ) is not None
+
+            for table, sql in plan_by_doc:
+                if _table_exists(table):
+                    session.execute(text(sql), {"id": document_id})
+
+            if source_sha256:
+                for table, sql in plan_by_sha:
+                    if _table_exists(table):
+                        session.execute(text(sql), {"sha": source_sha256})
+
+            session.commit()
+
     def build_query_string(
         self,
         *,
@@ -2540,6 +2669,12 @@ class AlbaranReviewRepository:
 
     @staticmethod
     def _apply_filters(*, stmt: Any, filters: DocumentListFilters) -> Any:
+        # Soft-delete (jun 2026): por defecto la portada muestra solo los
+        # ACTIVOS; la papelera muestra solo los borrados (is_active=false).
+        if filters.vista == "papelera":
+            stmt = stmt.where(AlbaranDocumentMergeOrm.is_active.is_(False))
+        else:
+            stmt = stmt.where(AlbaranDocumentMergeOrm.is_active.is_(True))
         if filters.search:
             term = f"%{filters.search.strip()}%"
             stmt = stmt.where(

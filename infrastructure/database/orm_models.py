@@ -59,6 +59,15 @@ class AlbaranDocumentMergeOrm(Base):
 
     created_at_utc: Mapped[str] = mapped_column(String(64), nullable=False)
 
+    # Soft-delete (jun 2026): borrado lógico desde la portada + papelera.
+    # El schema y los índices únicos parciales los gobierna sv3; sv4 lee y
+    # escribe estas columnas (borrar/restaurar). is_active default true.
+    is_active: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default="true"
+    )
+    deleted_at_utc: Mapped[str | None] = mapped_column(String(64))
+    deleted_by: Mapped[str | None] = mapped_column(String(255))
+
     lines: Mapped[list["AlbaranLineMergeOrm"]] = relationship(
         back_populates="document",
         cascade="all, delete-orphan",

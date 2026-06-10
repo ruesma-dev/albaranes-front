@@ -20,6 +20,15 @@ class DocumentListFilters(BaseModel):
     sort_dir: str = Field(default="asc")
     page: int = Field(default=1, ge=1)
     page_size: int = Field(default=25, ge=1, le=100)
+    # Soft-delete (jun 2026): "activos" (is_active=true, vista normal) o
+    # "papelera" (is_active=false, los borrados, restaurables).
+    vista: str = Field(default="activos")
+
+    @field_validator("vista")
+    @classmethod
+    def validate_vista(cls, value: str) -> str:
+        value = (value or "activos").strip().lower()
+        return value if value in {"activos", "papelera"} else "activos"
 
     @field_validator("approved")
     @classmethod
@@ -485,6 +494,7 @@ class PaginatedDocuments(BaseModel):
     approved_count: int
     pending_count: int
     review_required_count: int
+    trash_count: int = 0
 
 
 class SaveResponse(BaseModel):

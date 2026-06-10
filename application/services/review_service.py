@@ -50,6 +50,25 @@ class ReviewService:
             approved_by=approved_by or self._default_reviewer,
         )
 
+    def delete_document(
+        self, *, document_id: str, deleted_by: str | None
+    ) -> None:
+        """Soft-delete: mueve el albarán a la papelera (is_active=False)."""
+        self._repository.soft_delete_document(
+            document_id=document_id,
+            deleted_by=deleted_by or self._default_reviewer,
+        )
+
+    def restore_document(self, *, document_id: str) -> None:
+        """Restaura un albarán desde la papelera (is_active=True)."""
+        self._repository.restore_document(document_id=document_id)
+
+    def hard_delete_document(self, *, document_id: str) -> None:
+        """Purga DEFINITIVA: borra físicamente el albarán y todo lo que
+        cuelga de él (líneas, valoración, contratos asociados, cruda).
+        Irreversible. Pensado para usarse solo desde la papelera."""
+        self._repository.hard_delete_document(document_id=document_id)
+
     def remove_line_conciliacion(
         self,
         *,

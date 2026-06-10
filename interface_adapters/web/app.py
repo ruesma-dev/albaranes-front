@@ -314,6 +314,7 @@ def build_app(settings: Settings) -> FastAPI:
         max_confidence: str | None = Query(default=None),
         sort_by: str = Query(default="confidence_pct_calc"),
         sort_dir: str = Query(default="asc"),
+        vista: str = Query(default="activos"),
         page: int = Query(default=1, ge=1),
         page_size: int = Query(
             default=settings.default_page_size,
@@ -330,6 +331,7 @@ def build_app(settings: Settings) -> FastAPI:
             max_confidence=_parse_optional_float(max_confidence, field_name="max_confidence"),
             sort_by=sort_by,
             sort_dir=sort_dir,
+            vista=vista,
             page=page,
             page_size=page_size,
         )
@@ -393,6 +395,59 @@ def build_app(settings: Settings) -> FastAPI:
         review_service.unapprove_document(document_id=document_id)
         query = redirect_query.strip()
         message = urlencode({"message": "Documento marcado como pendiente"})
+        if query:
+            return RedirectResponse(
+                url=f"/documents?{query}&{message}".replace("?&", "?"),
+                status_code=303,
+            )
+        return RedirectResponse(url=f"/documents?{message}", status_code=303)
+
+    # ------------------------------------------------------------------ #
+    # Soft-delete (jun 2026): borrar (a papelera) y restaurar.
+    # ------------------------------------------------------------------ #
+    @app.post("/documents/{document_id}/delete", include_in_schema=False)
+    def delete_from_list(
+        document_id: str,
+        redirect_query: str = Form(default=""),
+        deleted_by: str = Form(default=""),
+    ) -> RedirectResponse:
+        review_service.delete_document(
+            document_id=document_id,
+            deleted_by=deleted_by.strip() or settings.default_reviewer,
+        )
+        query = redirect_query.strip()
+        message = urlencode({"message": "Albarán movido a la papelera"})
+        if query:
+            return RedirectResponse(
+                url=f"/documents?{query}&{message}".replace("?&", "?"),
+                status_code=303,
+            )
+        return RedirectResponse(url=f"/documents?{message}", status_code=303)
+
+    @app.post("/documents/{document_id}/restore", include_in_schema=False)
+    def restore_from_list(
+        document_id: str,
+        redirect_query: str = Form(default=""),
+    ) -> RedirectResponse:
+        review_service.restore_document(document_id=document_id)
+        query = redirect_query.strip()
+        message = urlencode({"message": "Albarán restaurado"})
+        if query:
+            return RedirectResponse(
+                url=f"/documents?{query}&{message}".replace("?&", "?"),
+                status_code=303,
+            )
+        return RedirectResponse(url=f"/documents?{message}", status_code=303)
+
+    @app.post("/documents/{document_id}/purge", include_in_schema=False)
+    def purge_from_list(
+        document_id: str,
+        redirect_query: str = Form(default=""),
+    ) -> RedirectResponse:
+        # Hard-delete: borrado físico irreversible. Solo desde la papelera.
+        review_service.hard_delete_document(document_id=document_id)
+        query = redirect_query.strip()
+        message = urlencode({"message": "Albarán eliminado definitivamente"})
         if query:
             return RedirectResponse(
                 url=f"/documents?{query}&{message}".replace("?&", "?"),

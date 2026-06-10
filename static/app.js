@@ -47,35 +47,12 @@
         return null;
     }
 
-    function wireContratoSelector() {
-        const selector = document.getElementById("selected_contrato_codigo");
-        if (!selector || selector.tagName !== "SELECT") return;
-        const cards = document.querySelectorAll(".js-contrato-card");
-        const headerBtn = findHeaderContratoBtn();
-
-        function syncHeaderBtn(codigo) {
-            if (!headerBtn) return;
-            const url = codigo ? contratosPdfMap[codigo] : null;
-            if (url) {
-                headerBtn.href = url;
-                headerBtn.title = "Abrir el PDF del contrato " + codigo;
-                headerBtn.style.display = "";
-            } else {
-                headerBtn.style.display = "none";
-            }
-        }
-
-        selector.addEventListener("change", function () {
-            const codigo = selector.value;
-            cards.forEach(function (card) {
-                card.style.display = card.dataset.codigo === codigo ? "" : "none";
-            });
-            syncHeaderBtn(codigo);
-        });
-        syncHeaderBtn(selector.value);
-    }
-
-    wireContratoSelector();
+    // El antiguo wireContratoSelector (que manejaba el <select> del caso
+    // "varios contratos") queda sustituido por wireContratoCombo(), montado
+    // al final del bloque de edición: un combo único con autocompletar
+    // (contratos detectados + «Sin contrato») que guarda y re-valora al
+    // cambiar. Se inicializa allí porque necesita documentId, collectPayload
+    // y triggerValuate, definidos dentro de ese bloque.
 
     // --------------------------------------------------------------- //
     // Edición de líneas del albarán (solo en vista merge)
@@ -743,12 +720,6 @@
         return (s || "").toString().toLowerCase()
             .normalize("NFD").replace(/[\u0300-\u036f]/g, "");
     }
-    // CIF normalizado para comparar por CLAVE EXACTA: mayusculas y solo
-    // alfanumerico (ignora espacios, guiones o puntos que la IA pudiera
-    // haber leido del albaran).
-    function _normCif(s) {
-        return (s || "").toString().toUpperCase().replace(/[^A-Z0-9]/g, "");
-    }
     function _comboLabel(kind, val, nombre) {
         if (kind === "obra") {
             return (val || "s/codigo") + (nombre ? " — " + nombre : "");
@@ -927,25 +898,6 @@
             }
             return false;
         };
-
-        // Rellena el NOMBRE canonico del proveedor a partir de un CIF ya
-        // resuelto (lo fijo la IA o viene del contrato). Busca el CIF como
-        // CLAVE EXACTA en la lista de Sigrid (que ahora trae prv.raz) y, si
-        // lo encuentra, fija nombre + cif canonicos. Al ser match exacto por
-        // CIF (no difuso), NO marca "sugerido". Solo aplica al proveedor.
-        combo._fillFromCif = async function (cifRaw) {
-            if (kind !== "proveedor") return false;
-            const target = _normCif(cifRaw);
-            if (!target) return false;
-            await ensureLoaded(true);   // carga silenciosa (sin abrir panel)
-            if (!items.length) return false;
-            let match = null;
-            items.forEach(function (it) {
-                if (_normCif(it.val) === target) match = it;
-            });
-            if (match) { choose(match); return true; }
-            return false;
-        };
     }
 
     // Excluimos los combos de lineas de contrato (.combo-lines): son
@@ -969,21 +921,11 @@
             obraNombre && (obraNombre.value || "").trim()) {
             try { await obraCombo._proposeBest(obraNombre.value); } catch (_) {}
         }
-        // Proveedor: depende de la obra (sus contratos en Sigrid).
-        //   - Si YA hay CIF resuelto (lo fijo la IA o viene del contrato),
-        //     usamos ese CIF como CLAVE EXACTA para traer la razon social
-        //     canonica de Sigrid (prv.raz) y corregir el nombre — aunque la
-        //     IA hubiera leido un nombre abreviado/mal del albaran.
-        //   - Si NO hay CIF pero si hay nombre, caemos al match difuso por
-        //     texto (comportamiento anterior).
-        if (provCombo && obraCodigo && (obraCodigo.value || "").trim()) {
-            const cifVal = provCif ? (provCif.value || "").trim() : "";
-            if (cifVal && provCombo._fillFromCif) {
-                try { await provCombo._fillFromCif(cifVal); } catch (_) {}
-            } else if (provCombo._proposeBest && !cifVal &&
-                       provNombre && (provNombre.value || "").trim()) {
-                try { await provCombo._proposeBest(provNombre.value); } catch (_) {}
-            }
+        if (provCombo && provCombo._proposeBest &&
+            obraCodigo && (obraCodigo.value || "").trim() &&
+            provCif && !(provCif.value || "").trim() &&
+            provNombre && (provNombre.value || "").trim()) {
+            try { await provCombo._proposeBest(provNombre.value); } catch (_) {}
         }
     })();
 
@@ -1329,6 +1271,168 @@
             triggerValuate();
         });
     }
+
+    // --------------------------------------------------------------- //
+    // Combo de contrato (jun 2026)
+    //
+    // Un único combo con autocompletar (mismo makeLineCombo que las filas
+    // de conciliación) que lista los contratos detectados por CIF+obra MÁS
+    // la opción «Sin contrato». Sustituye al <select> del caso "varios" y
+    // al estado fijo del caso "1 contrato". Al elegir:
+    //   - contrato real → escribe el código en el hidden y reutiliza
+    //     triggerValuate() (guarda con PUT y RE-VALORA con sondeo).
+    //   - «Sin contrato» → vacía el hidden y solo GUARDA (PUT); no se valora
+    //     porque no hay nada contra qué hacerlo (el backend ya persiste NULL
+    //     y el botón "Valorar ahora" queda deshabilitado).
+    // Cuando el proceso no detectó contrato, el combo arranca en «Sin
+    // contrato» (hidden vacío) y solo ofrece esa opción hasta que se
+    // re-busque corrigiendo CIF/obra.
+    // --------------------------------------------------------------- //
+    function wireContratoCombo() {
+        const mount = document.getElementById("contrato-combo-mount");
+        const hidden = document.getElementById("selected_contrato_codigo");
+        if (!mount || !hidden) return;
+
+        const headerBtn = findHeaderContratoBtn();
+        const cards = document.querySelectorAll(".js-contrato-card");
+        const statusEl = document.getElementById("contrato-combo-status");
+        const SIN = "__sin_contrato__";
+        const SIN_PLACEHOLDER = "Sin contrato — escribe para elegir uno…";
+
+        let contratos = [];
+        const dataTag = document.getElementById("contratos-combo-data");
+        if (dataTag) {
+            try { contratos = JSON.parse(dataTag.textContent) || []; }
+            catch (exc) {
+                console.warn("contratos-combo-data ilegible:", exc);
+                contratos = [];
+            }
+        }
+        const labelByCodigo = {};
+        contratos.forEach(function (c) { labelByCodigo[c.codigo] = c.label; });
+
+        function syncHeaderBtn(codigo) {
+            if (!headerBtn) return;
+            const url = codigo ? contratosPdfMap[codigo] : null;
+            if (url) {
+                headerBtn.href = url;
+                headerBtn.title = "Abrir el PDF del contrato " + codigo;
+                headerBtn.style.display = "";
+            } else {
+                headerBtn.style.display = "none";
+            }
+        }
+
+        function showCard(codigo) {
+            cards.forEach(function (card) {
+                card.style.display =
+                    card.dataset.codigo === codigo ? "" : "none";
+            });
+        }
+
+        function status(kind, text) {
+            if (!statusEl) return;
+            statusEl.hidden = false;
+            statusEl.className = "valuate-status valuate-" + kind;
+            statusEl.textContent = text;
+        }
+
+        // Estado inicial.
+        const current = (hidden.value || "").trim();
+        showCard(current);
+        syncHeaderBtn(current || null);
+        if (valuateBtn) valuateBtn.disabled = !current;
+
+        // Monta el combo (reutiliza makeLineCombo: combo local, panel fixed,
+        // teclado, normalización sin acentos).
+        const combo = makeLineCombo({
+            placeholder: "Escribe para buscar el contrato…",
+            lines: contratos.map(function (c) {
+                return { id: c.codigo, label: c.label };
+            }),
+            nuevaValue: SIN,
+            nuevaLabel: "🚫 Sin contrato",
+            onPick: function (value) { onPickContrato(value); },
+        });
+        combo.classList.add("js-contrato-combo");
+        mount.appendChild(combo);
+
+        const input = combo.querySelector(".combo-input");
+        if (input) {
+            if (current) {
+                input.value = labelByCodigo[current] || current;
+            } else {
+                input.value = "";
+                input.placeholder = SIN_PLACEHOLDER;
+            }
+            // Al enfocar, seleccionamos el texto para que la primera tecla lo
+            // reemplace (misma UX que el combo de líneas).
+            input.addEventListener("focus", function () { this.select(); });
+        }
+
+        async function persistSelection() {
+            // PUT sin navegar: persiste la selección actual (y los campos
+            // editados), igual que el paso 1 de triggerValuate.
+            const resp = await fetch(`/api/documents/${documentId}`, {
+                method: "PUT",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(collectPayload(false)),
+            });
+            if (!resp.ok) {
+                let detail = resp.statusText;
+                try {
+                    const b = await resp.json();
+                    detail = b.detail || detail;
+                } catch (_) {}
+                throw new Error(detail);
+            }
+        }
+
+        async function onPickContrato(value) {
+            const sinContrato = (value === SIN || !value);
+            const codigo = sinContrato ? "" : value;
+
+            // 1) Estado visual + hidden (lo leen collectPayload y triggerValuate).
+            hidden.value = codigo;
+            showCard(codigo);
+            syncHeaderBtn(codigo || null);
+            if (input) {
+                if (sinContrato) {
+                    input.value = "";
+                    input.placeholder = SIN_PLACEHOLDER;
+                } else {
+                    input.value = labelByCodigo[codigo] || codigo;
+                }
+            }
+
+            if (sinContrato) {
+                // 2a) «Sin contrato»: solo guardar (no hay contra qué valorar).
+                if (valuateBtn) valuateBtn.disabled = true;
+                status("loading", "Guardando «Sin contrato»…");
+                try {
+                    await persistSelection();
+                    status(
+                        "ok",
+                        "Contrato eliminado. Este albarán queda sin " +
+                        "contrato (no se valora)."
+                    );
+                } catch (exc) {
+                    status(
+                        "error",
+                        "Error al guardar: " + (exc && exc.message || exc)
+                    );
+                }
+                return;
+            }
+
+            // 2b) Contrato real: guardar + re-valorar (triggerValuate hace
+            //     PUT + POST /valuate + sondeo y refresca la página al acabar).
+            if (valuateBtn) valuateBtn.disabled = false;
+            status("loading", "Contrato seleccionado. Guardando y valorando…");
+            await triggerValuate();
+        }
+    }
+    wireContratoCombo();
 
     // Valoracion INICIAL en segundo plano: la lanza el pipeline
     // (sv7 -> sv6 -> sv5) tras asociar el contrato, NO este boton. Si al
