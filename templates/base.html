@@ -4,7 +4,21 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light">
+    <meta name="description" content="Revisión de albaranes con IA — Construcciones Ruesma.">
     <title>{{ title }}</title>
+
+    <link rel="icon" type="image/svg+xml"
+          href="{{ request.url_for('static', path='img/favicon.svg') }}">
+
+    {# Tipografías corporativas (las mismas del portal):
+       Bricolage Grotesque (display) + Archivo (cuerpo). #}
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link
+        href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700;12..96,800&family=Archivo:wght@400;500;600&display=swap"
+        rel="stylesheet">
+
     {# Cache-buster: un timestamp por arranque del servicio fuerza al
        navegador a recargar el CSS cuando reiniciamos sv4. Útil
        durante desarrollo para que un Ctrl+R baste (sin tener que
@@ -15,10 +29,19 @@
 <body>
 <header class="topbar">
     <div class="container topbar-inner">
-        <a class="brand" href="/documents">{{ title }}</a>
+        <a class="topbar__brand" href="/documents" title="{{ title }}" aria-label="Inicio — {{ title }}">
+            <img class="topbar__logo"
+                 src="{{ request.url_for('static', path='img/logo-ruesma.svg') }}"
+                 alt="Construcciones Ruesma">
+            <span class="topbar__sep" aria-hidden="true"></span>
+            <span class="topbar__tag">Albaranes</span>
+        </a>
         <nav class="topnav">
             <a href="/documents">Bandeja</a>
             <a href="/health" target="_blank" rel="noreferrer">Health</a>
+            <a class="topnav__portal"
+               href="https://portal.ruesma.es"
+               title="Volver al portal corporativo">Portal ↗</a>
         </nav>
     </div>
 </header>
@@ -29,6 +52,14 @@
     {% endif %}
     {% block content %}{% endblock %}
 </main>
+
+<footer class="container footer">
+    <span>Construcciones Ruesma</span>
+    <span class="footer__dot" aria-hidden="true">·</span>
+    <span>{{ title }}</span>
+    <span class="footer__dot" aria-hidden="true">·</span>
+    <span>Acceso interno</span>
+</footer>
 
 <script src="{{ request.url_for('static', path='app.js') }}?v={{ asset_version|default('1') }}"></script>
 {% block scripts %}{% endblock %}

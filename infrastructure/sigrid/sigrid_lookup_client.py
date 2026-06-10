@@ -18,16 +18,31 @@ _LOG_PREFIX = "[sigrid-lookup]"
 # joins que el contrato-client del sv3 (ctr + con + con_obr), pero SIN el
 # filtro de cif: queremos TODOS los proveedores de la obra. emp=1 (empresa
 # Construcciones Ruesma), igual que el contrato-client.
+#
+# NOMBRE Y CIF desde la FICHA del proveedor (tabla ``prv``), no desde el
+# snapshot desnormalizado del contrato (``ctr.entres`` / ``ctr.entcif``).
+# ``ctr.entres`` es un texto que se teclea al crear el contrato y suele
+# venir abreviado o mal escrito (p.ej. "de obras Mostoles, s.l."), mientras
+# que ``prv.raz`` es la razon social canonica ("Suministros de Obras
+# Mostoles S.L."). Mismo join que usa el contrato-client del sv3
+# (``JOIN prv ON ctr.entide = prv.ide``).
+#
+# NO usamos SELECT DISTINCT: ``prv.raz`` puede ser de tipo text/ntext en
+# Sigrid y SQL Server lanzaria error 42000 ("text/ntext no se puede
+# seleccionar como DISTINCT"). Deduplicamos POR CIF en Python (ver
+# ``fetch_proveedores_por_obra``). ``ORDER BY prv.cif`` es seguro porque
+# ``cif`` es comparable; el orden final por nombre lo da Python.
 _SQL_PROVEEDORES_POR_OBRA = """\
-SELECT DISTINCT
-    ctr.entcif AS cif,
-    ctr.entres AS nombre
+SELECT
+    prv.cif AS cif,
+    prv.raz AS nombre
 FROM ctr
 JOIN con AS con_ctr ON ctr.ide    = con_ctr.ide
 JOIN con AS con_obr ON ctr.obride = con_obr.ide
+JOIN prv            ON ctr.entide = prv.ide
 WHERE con_obr.cod = ?
   AND con_ctr.emp = 1
-ORDER BY ctr.entres
+ORDER BY prv.cif
 """
 
 # Lista de obras (codigo + nombre). Mismo join que el obra-client del sv3
@@ -116,6 +131,10 @@ class SigridLookupClient:
             out.append(
                 ProveedorOption(cif=cif, nombre=_opt_str(row_map.get("nombre")))
             )
+        # Orden alfabetico por razon social. El SQL ordena por cif (campo
+        # comparable) para no comparar prv.raz, que puede ser text/ntext;
+        # el orden que ve el usuario lo damos aqui.
+        out.sort(key=lambda p: (p.nombre or "").lower())
         logger.info(
             "%s proveedores_por_obra obra=%s -> %s proveedores",
             _LOG_PREFIX,

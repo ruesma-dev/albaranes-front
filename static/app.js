@@ -743,6 +743,12 @@
         return (s || "").toString().toLowerCase()
             .normalize("NFD").replace(/[\u0300-\u036f]/g, "");
     }
+    // CIF normalizado para comparar por CLAVE EXACTA: mayusculas y solo
+    // alfanumerico (ignora espacios, guiones o puntos que la IA pudiera
+    // haber leido del albaran).
+    function _normCif(s) {
+        return (s || "").toString().toUpperCase().replace(/[^A-Z0-9]/g, "");
+    }
     function _comboLabel(kind, val, nombre) {
         if (kind === "obra") {
             return (val || "s/codigo") + (nombre ? " — " + nombre : "");
@@ -921,6 +927,25 @@
             }
             return false;
         };
+
+        // Rellena el NOMBRE canonico del proveedor a partir de un CIF ya
+        // resuelto (lo fijo la IA o viene del contrato). Busca el CIF como
+        // CLAVE EXACTA en la lista de Sigrid (que ahora trae prv.raz) y, si
+        // lo encuentra, fija nombre + cif canonicos. Al ser match exacto por
+        // CIF (no difuso), NO marca "sugerido". Solo aplica al proveedor.
+        combo._fillFromCif = async function (cifRaw) {
+            if (kind !== "proveedor") return false;
+            const target = _normCif(cifRaw);
+            if (!target) return false;
+            await ensureLoaded(true);   // carga silenciosa (sin abrir panel)
+            if (!items.length) return false;
+            let match = null;
+            items.forEach(function (it) {
+                if (_normCif(it.val) === target) match = it;
+            });
+            if (match) { choose(match); return true; }
+            return false;
+        };
     }
 
     // Excluimos los combos de lineas de contrato (.combo-lines): son
@@ -944,11 +969,21 @@
             obraNombre && (obraNombre.value || "").trim()) {
             try { await obraCombo._proposeBest(obraNombre.value); } catch (_) {}
         }
-        if (provCombo && provCombo._proposeBest &&
-            obraCodigo && (obraCodigo.value || "").trim() &&
-            provCif && !(provCif.value || "").trim() &&
-            provNombre && (provNombre.value || "").trim()) {
-            try { await provCombo._proposeBest(provNombre.value); } catch (_) {}
+        // Proveedor: depende de la obra (sus contratos en Sigrid).
+        //   - Si YA hay CIF resuelto (lo fijo la IA o viene del contrato),
+        //     usamos ese CIF como CLAVE EXACTA para traer la razon social
+        //     canonica de Sigrid (prv.raz) y corregir el nombre — aunque la
+        //     IA hubiera leido un nombre abreviado/mal del albaran.
+        //   - Si NO hay CIF pero si hay nombre, caemos al match difuso por
+        //     texto (comportamiento anterior).
+        if (provCombo && obraCodigo && (obraCodigo.value || "").trim()) {
+            const cifVal = provCif ? (provCif.value || "").trim() : "";
+            if (cifVal && provCombo._fillFromCif) {
+                try { await provCombo._fillFromCif(cifVal); } catch (_) {}
+            } else if (provCombo._proposeBest && !cifVal &&
+                       provNombre && (provNombre.value || "").trim()) {
+                try { await provCombo._proposeBest(provNombre.value); } catch (_) {}
+            }
         }
     })();
 
