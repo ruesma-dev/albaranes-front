@@ -410,6 +410,16 @@
                         {% endif %}
                     </h3>
                     <button type="button" class="btn secondary small" id="undo-btn" title="Deshacer los cambios no guardados" hidden>Deshacer</button>
+                    {% if valuation %}
+                        <button type="button" class="btn secondary small" id="bulk-copy-btn"
+                                title="Para cada línea SIN casar, crea su salmon «Nueva» copiando la línea blanca leída por la IA (igual que el botón + → Nueva, pero en bloque)">
+                            Copiar sin casar → Nueva
+                        </button>
+                        <button type="button" class="btn danger small" id="bulk-delete-btn"
+                                title="Borra TODAS las líneas casadas (Sigrid y Nueva). Dejarán de contar en el total y reaparecerá el botón + en cada línea">
+                            Borrar casadas
+                        </button>
+                    {% endif %}
                     <button type="button" class="btn secondary small" id="add-line-btn">Añadir línea</button>
                 </div>
 

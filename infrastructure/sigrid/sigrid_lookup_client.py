@@ -7,7 +7,7 @@ from typing import Any
 
 import httpx
 
-from domain.models.review_models import ObraOption, ProveedorOption
+from domain.models.review_models import ContratoOption, ObraOption, ProveedorOption
 
 logger = logging.getLogger(__name__)
 
@@ -18,31 +18,16 @@ _LOG_PREFIX = "[sigrid-lookup]"
 # joins que el contrato-client del sv3 (ctr + con + con_obr), pero SIN el
 # filtro de cif: queremos TODOS los proveedores de la obra. emp=1 (empresa
 # Construcciones Ruesma), igual que el contrato-client.
-#
-# NOMBRE Y CIF desde la FICHA del proveedor (tabla ``prv``), no desde el
-# snapshot desnormalizado del contrato (``ctr.entres`` / ``ctr.entcif``).
-# ``ctr.entres`` es un texto que se teclea al crear el contrato y suele
-# venir abreviado o mal escrito (p.ej. "de obras Mostoles, s.l."), mientras
-# que ``prv.raz`` es la razon social canonica ("Suministros de Obras
-# Mostoles S.L."). Mismo join que usa el contrato-client del sv3
-# (``JOIN prv ON ctr.entide = prv.ide``).
-#
-# NO usamos SELECT DISTINCT: ``prv.raz`` puede ser de tipo text/ntext en
-# Sigrid y SQL Server lanzaria error 42000 ("text/ntext no se puede
-# seleccionar como DISTINCT"). Deduplicamos POR CIF en Python (ver
-# ``fetch_proveedores_por_obra``). ``ORDER BY prv.cif`` es seguro porque
-# ``cif`` es comparable; el orden final por nombre lo da Python.
 _SQL_PROVEEDORES_POR_OBRA = """\
-SELECT
-    prv.cif AS cif,
-    prv.raz AS nombre
+SELECT DISTINCT
+    ctr.entcif AS cif,
+    ctr.entres AS nombre
 FROM ctr
 JOIN con AS con_ctr ON ctr.ide    = con_ctr.ide
 JOIN con AS con_obr ON ctr.obride = con_obr.ide
-JOIN prv            ON ctr.entide = prv.ide
 WHERE con_obr.cod = ?
   AND con_ctr.emp = 1
-ORDER BY prv.cif
+ORDER BY ctr.entres
 """
 
 # Lista de obras (codigo + nombre). Mismo join que el obra-client del sv3
@@ -62,6 +47,27 @@ FROM obr
 JOIN con ON obr.ide = con.ide
 WHERE con.cod IS NOT NULL
 ORDER BY con.cod
+"""
+
+# Contratos de una obra (codigo + nombre del contrato + proveedor). Mismo
+# join que proveedores (ctr + con_ctr + con_obr), filtrando por obra. emp=1
+# (Construcciones Ruesma). NO usamos SELECT DISTINCT porque ``con_ctr.res``
+# (nombre del contrato) es text/ntext en Sigrid y SQL Server no permite
+# DISTINCT sobre ese tipo (error 42000); deduplicamos POR CODIGO en Python,
+# igual que el desplegable de obras. El filtro por CIF se aplica en Python
+# (laxo, normalizando) para tolerar diferencias de formato del CIF.
+_SQL_CONTRATOS_POR_OBRA = """\
+SELECT
+    con_ctr.cod AS codigo,
+    con_ctr.res AS nombre,
+    ctr.entcif  AS cif,
+    ctr.entres  AS nombre_proveedor
+FROM ctr
+JOIN con AS con_ctr ON ctr.ide    = con_ctr.ide
+JOIN con AS con_obr ON ctr.obride = con_obr.ide
+WHERE con_obr.cod = ?
+  AND con_ctr.emp = 1
+ORDER BY con_ctr.cod
 """
 
 
@@ -131,10 +137,6 @@ class SigridLookupClient:
             out.append(
                 ProveedorOption(cif=cif, nombre=_opt_str(row_map.get("nombre")))
             )
-        # Orden alfabetico por razon social. El SQL ordena por cif (campo
-        # comparable) para no comparar prv.raz, que puede ser text/ntext;
-        # el orden que ve el usuario lo damos aqui.
-        out.sort(key=lambda p: (p.nombre or "").lower())
         logger.info(
             "%s proveedores_por_obra obra=%s -> %s proveedores",
             _LOG_PREFIX,
@@ -161,6 +163,56 @@ class SigridLookupClient:
                 ObraOption(codigo=cod, nombre=_opt_str(row_map.get("nombre")))
             )
         logger.info("%s obras -> %s obras", _LOG_PREFIX, len(out))
+        return out
+
+    def fetch_contratos(
+        self,
+        *,
+        codigo_obra: str,
+        cif: str | None = None,
+    ) -> list[ContratoOption]:
+        """Contratos de una obra en Sigrid (codigo + nombre + proveedor).
+
+        Si se pasa ``cif``, filtra (laxo, normalizado) a los contratos de
+        ese proveedor; si no, devuelve todos los de la obra. Deduplica por
+        codigo de contrato.
+        """
+        codigo = (codigo_obra or "").strip()
+        if not codigo:
+            return []
+        columns, rows = self._post_sql_read(
+            sql=_SQL_CONTRATOS_POR_OBRA,
+            parameters=[codigo],
+            label=f"contratos_obra_{codigo}",
+        )
+
+        def _norm_cif(value: str | None) -> str:
+            return (value or "").strip().upper().replace(" ", "").replace("-", "")
+
+        cif_filtro = _norm_cif(cif) if cif else None
+        seen: set[str] = set()
+        out: list[ContratoOption] = []
+        for row in rows:
+            row_map = dict(zip(columns, row))
+            cod = _opt_str(row_map.get("codigo"))
+            if not cod or cod in seen:
+                continue
+            row_cif = _opt_str(row_map.get("cif"))
+            if cif_filtro and _norm_cif(row_cif) != cif_filtro:
+                continue
+            seen.add(cod)
+            out.append(
+                ContratoOption(
+                    codigo=cod,
+                    nombre=_opt_str(row_map.get("nombre")),
+                    cif=row_cif,
+                    nombre_proveedor=_opt_str(row_map.get("nombre_proveedor")),
+                )
+            )
+        logger.info(
+            "%s contratos_obra obra=%s cif=%s -> %s contratos",
+            _LOG_PREFIX, codigo, cif_filtro or "(todos)", len(out),
+        )
         return out
 
     # ----------------------------------------------------------------- #

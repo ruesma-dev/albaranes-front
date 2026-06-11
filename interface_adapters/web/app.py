@@ -304,6 +304,49 @@ def build_app(settings: Settings) -> FastAPI:
         items = [{"codigo": o.codigo, "nombre": o.nombre} for o in obras]
         return JSONResponse({"ok": True, "items": items})
 
+    @app.get("/api/sigrid/contratos", include_in_schema=False)
+    def sigrid_contratos(
+        obra: str = Query(default=""),
+        cif: str = Query(default=""),
+    ) -> JSONResponse:
+        # Búsqueda EN VIVO de contratos en Sigrid por obra (+ cif opcional),
+        # igual que los desplegables de obra/proveedor. SOLO lectura; el
+        # cacheo de líneas (para poder valorar) lo hace el re-fetch de sv3
+        # cuando el front confirma la selección.
+        client = app.state.sigrid_lookup_client
+        if client is None:
+            return JSONResponse(
+                {"ok": False, "error": "Sigrid no configurado en el sv4 "
+                 "(faltan SIGRID_API_*).", "items": []}
+            )
+        codigo = (obra or "").strip()
+        if not codigo:
+            return JSONResponse(
+                {"ok": False, "error": "Falta el codigo de obra.", "items": []}
+            )
+        try:
+            contratos = client.fetch_contratos(
+                codigo_obra=codigo,
+                cif=(cif or "").strip() or None,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[sigrid-lookup] contratos obra=%s fallo: %r", codigo, exc
+            )
+            return JSONResponse(
+                {"ok": False, "error": f"Error consultando Sigrid: {exc}", "items": []}
+            )
+        items = [
+            {
+                "codigo": c.codigo,
+                "nombre": c.nombre,
+                "cif": c.cif,
+                "nombre_proveedor": c.nombre_proveedor,
+            }
+            for c in contratos
+        ]
+        return JSONResponse({"ok": True, "items": items})
+
     @app.get("/documents", response_class=HTMLResponse)
     def documents_list(
         request: Request,

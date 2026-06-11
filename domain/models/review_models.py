@@ -131,6 +131,17 @@ class ObraOption(BaseModel):
     nombre: str | None = None
 
 
+class ContratoOption(BaseModel):
+    """Opcion de contrato para el desplegable de contratos (jun 2026).
+    Resultado de buscar EN VIVO en Sigrid por obra (+ cif opcional), igual
+    que los desplegables de obra/proveedor."""
+
+    codigo: str | None = None
+    nombre: str | None = None
+    cif: str | None = None
+    nombre_proveedor: str | None = None
+
+
 class ContratoPayload(BaseModel):
     id: int
     codigo_contrato: str

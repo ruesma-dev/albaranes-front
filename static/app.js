@@ -575,6 +575,118 @@
         }
     });
 
+    // --------------------------------------------------------------- //
+    // Acciones MASIVAS sobre las conciliaciones (jun 2026).
+    //
+    // - "Borrar casadas": borra TODAS las líneas casadas (salmon Sigrid y
+    //   Nueva) reutilizando el DELETE individual, en serie para no
+    //   machacar el backend. Al acabar recarga.
+    // - "Copiar sin casar → Nueva": para cada línea del albarán SIN
+    //   conciliación (las que muestran el botón +), crea su salmon
+    //   «Nueva» copiando la línea blanca (mismo POST {mode:"nueva"} que
+    //   el + → Nueva individual).
+    // Ambas piden confirmación con el nº de líneas afectadas e informan
+    // del progreso en el propio botón.
+    // --------------------------------------------------------------- //
+    const bulkDeleteBtn = document.getElementById("bulk-delete-btn");
+    const bulkCopyBtn = document.getElementById("bulk-copy-btn");
+
+    function collectVidsCasadas() {
+        // Filas salmon reales (excluye la fila temporal del "+", que es
+        // .concilia-add y no lleva valuation_line_id).
+        const out = [];
+        linesBody.querySelectorAll(
+            "tr.conciliacion-row[data-for-valuation-line-id]"
+        ).forEach(function (row) {
+            if (row.classList.contains("concilia-add")) return;
+            const vid = (row.dataset.forValuationLineId || "").trim();
+            if (vid) out.push(vid);
+        });
+        return out;
+    }
+
+    function collectMergeIdsSinCasar() {
+        // Las líneas SIN conciliación son las que tienen el botón "+".
+        const out = [];
+        linesBody.querySelectorAll(".js-add-concilia").forEach(function (btn) {
+            const tr = btn.closest("tr");
+            const mergeId = tr ? (tr.dataset.lineId || "").trim() : "";
+            if (mergeId) out.push(mergeId);
+        });
+        return out;
+    }
+
+    async function runBulk(btn, items, labelProgress, worker) {
+        btn.disabled = true;
+        const originalText = btn.textContent;
+        let failures = 0;
+        for (let i = 0; i < items.length; i++) {
+            btn.textContent = labelProgress + " " + (i + 1) + "/" + items.length + "…";
+            try {
+                const ok = await worker(items[i]);
+                if (!ok) failures++;
+            } catch (e) {
+                failures++;
+            }
+        }
+        if (failures) {
+            window.alert(
+                "Terminado con " + failures + " error(es) de " + items.length +
+                ". Se recargará para reflejar lo aplicado."
+            );
+        }
+        window.location.reload();
+        // Por si la recarga tarda: restaurar estado visual.
+        btn.textContent = originalText;
+    }
+
+    if (bulkDeleteBtn) {
+        bulkDeleteBtn.addEventListener("click", async function () {
+            const vids = collectVidsCasadas();
+            if (!vids.length) {
+                window.alert("No hay líneas casadas que borrar.");
+                return;
+            }
+            if (!window.confirm(
+                "¿Borrar las " + vids.length + " línea(s) casada(s) (Sigrid y " +
+                "Nueva)? Dejarán de contar en el total y reaparecerá el botón " +
+                "+ en cada línea."
+            )) return;
+            await runBulk(bulkDeleteBtn, vids, "Borrando", async function (vid) {
+                const resp = await fetch(
+                    `/api/documents/${documentId}/lines/${vid}/conciliacion`,
+                    { method: "DELETE" }
+                );
+                return resp.ok;
+            });
+        });
+    }
+
+    if (bulkCopyBtn) {
+        bulkCopyBtn.addEventListener("click", async function () {
+            const mergeIds = collectMergeIdsSinCasar();
+            if (!mergeIds.length) {
+                window.alert("No hay líneas sin casar: todas tienen ya su línea de contrato.");
+                return;
+            }
+            if (!window.confirm(
+                "¿Crear una línea «Nueva» para las " + mergeIds.length +
+                " línea(s) sin casar, copiando la línea blanca leída por la IA?"
+            )) return;
+            await runBulk(bulkCopyBtn, mergeIds, "Copiando", async function (mergeId) {
+                const resp = await fetch(
+                    `/api/documents/${documentId}/lines/by-merge/${mergeId}/conciliacion`,
+                    {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ mode: "nueva" }),
+                    }
+                );
+                return resp.ok;
+            });
+        });
+    }
+
     if (addLineBtn) {
         addLineBtn.addEventListener("click", function () {
             const row = buildEmptyRow(linesBody.querySelectorAll("tr").length);
@@ -1288,7 +1400,22 @@
     // contrato» (hidden vacío) y solo ofrece esa opción hasta que se
     // re-busque corrigiendo CIF/obra.
     // --------------------------------------------------------------- //
-    function wireContratoCombo() {
+    // --------------------------------------------------------------- //
+    // Combo de contrato REMOTO (jun 2026)
+    //
+    // Igual que los desplegables de obra/proveedor: al desplegarlo consulta
+    // Sigrid EN VIVO (GET /api/sigrid/contratos?obra=&cif=) con la obra y el
+    // CIF actuales del formulario; al escribir filtra en local. Resuelve el
+    // caso de cambiar de obra: ya no depende de lo cacheado en Postgres.
+    //
+    // Al elegir un contrato real, como valorar exige que las LÍNEAS del
+    // contrato estén cacheadas (sv5 las lee de Postgres), el flujo es:
+    //   1) fija el código en el hidden + guarda (PUT con la obra/cif),
+    //   2) re-fetch en sv3 (consulta Sigrid y CACHEA contratos + líneas),
+    //   3) triggerValuate (re-guarda selección + valora + recarga).
+    // «Sin contrato» solo guarda (no valora).
+    // --------------------------------------------------------------- //
+    function initContratoComboRemoto() {
         const mount = document.getElementById("contrato-combo-mount");
         const hidden = document.getElementById("selected_contrato_codigo");
         if (!mount || !hidden) return;
@@ -1297,20 +1424,27 @@
         const cards = document.querySelectorAll(".js-contrato-card");
         const statusEl = document.getElementById("contrato-combo-status");
         const SIN = "__sin_contrato__";
-        const SIN_PLACEHOLDER = "Sin contrato — escribe para elegir uno…";
+        const SIN_ITEM = { codigo: SIN, label: "\ud83d\udeab Sin contrato", norm: _norm("sin contrato") };
 
-        let contratos = [];
+        // Etiquetas de los contratos YA cacheados (solo para el estado inicial).
+        const labelByCodigo = {};
         const dataTag = document.getElementById("contratos-combo-data");
         if (dataTag) {
-            try { contratos = JSON.parse(dataTag.textContent) || []; }
-            catch (exc) {
-                console.warn("contratos-combo-data ilegible:", exc);
-                contratos = [];
-            }
+            try {
+                (JSON.parse(dataTag.textContent) || []).forEach(function (c) {
+                    labelByCodigo[c.codigo] = c.label;
+                });
+            } catch (_) {}
         }
-        const labelByCodigo = {};
-        contratos.forEach(function (c) { labelByCodigo[c.codigo] = c.label; });
 
+        function obraActual() {
+            const el = document.getElementById("obra_codigo");
+            return el ? (el.value || "").trim() : "";
+        }
+        function cifActual() {
+            const el = document.getElementById("proveedor_cif");
+            return el ? (el.value || "").trim() : "";
+        }
         function syncHeaderBtn(codigo) {
             if (!headerBtn) return;
             const url = codigo ? contratosPdfMap[codigo] : null;
@@ -1322,14 +1456,11 @@
                 headerBtn.style.display = "none";
             }
         }
-
         function showCard(codigo) {
             cards.forEach(function (card) {
-                card.style.display =
-                    card.dataset.codigo === codigo ? "" : "none";
+                card.style.display = card.dataset.codigo === codigo ? "" : "none";
             });
         }
-
         function status(kind, text) {
             if (!statusEl) return;
             statusEl.hidden = false;
@@ -1337,42 +1468,145 @@
             statusEl.textContent = text;
         }
 
-        // Estado inicial.
+        // ---- DOM del combo (mismas clases .combo que obra/proveedor) ----
+        const combo = document.createElement("div");
+        combo.className = "combo combo-lines js-contrato-combo";
+        const input = document.createElement("input");
+        input.type = "text";
+        input.className = "combo-input";
+        input.setAttribute("autocomplete", "off");
+        input.placeholder = "Escribe para buscar el contrato en Sigrid\u2026";
+        const panel = document.createElement("div");
+        panel.className = "combo-panel";
+        panel.hidden = true;
+        combo.appendChild(input);
+        combo.appendChild(panel);
+        mount.appendChild(combo);
+
+        let items = [];        // [{codigo,label,norm}] (contratos de Sigrid)
+        let filtered = [];
+        let activeIdx = -1;
+        let loadedKey = null;
+        let loading = false;
+
+        function place() {
+            const r = input.getBoundingClientRect();
+            panel.style.position = "fixed";
+            panel.style.top = (r.bottom + 4) + "px";
+            panel.style.left = r.left + "px";
+            panel.style.minWidth = Math.max(r.width, 360) + "px";
+            panel.style.maxWidth = "720px";
+        }
+        function close() { panel.hidden = true; activeIdx = -1; }
+        function msg(text, cls) {
+            panel.innerHTML = "";
+            const d = document.createElement("div");
+            d.className = "combo-msg" + (cls ? " " + cls : "");
+            d.textContent = text;
+            panel.appendChild(d);
+            panel.hidden = false;
+            place();
+        }
+        function render(list) {
+            filtered = list;
+            if (!list.length) { msg("Sin coincidencias"); return; }
+            panel.innerHTML = "";
+            list.forEach(function (it, i) {
+                const d = document.createElement("div");
+                d.className = "combo-item" + (i === activeIdx ? " active" : "");
+                d.textContent = it.label;
+                d.addEventListener("mousedown", function (e) {
+                    e.preventDefault();
+                    onPick(it.codigo);
+                });
+                panel.appendChild(d);
+            });
+            panel.hidden = false;
+            place();
+        }
+        function applyFilter() {
+            activeIdx = -1;
+            const q = _norm(input.value);
+            const matches = !q ? items.slice()
+                : items.filter(function (it) { return it.norm.indexOf(q) !== -1; });
+            // «Sin contrato» siempre disponible, arriba del todo.
+            render([SIN_ITEM].concat(matches));
+        }
+        async function ensureLoaded() {
+            const key = obraActual() + "|" + cifActual();
+            if (loading) return;
+            if (loadedKey === key && items.length) { applyFilter(); return; }
+            const obra = obraActual();
+            if (!obra) {
+                items = []; loadedKey = key;
+                msg("Indica primero la obra para buscar sus contratos. Puedes elegir \u00abSin contrato\u00bb.");
+                return;
+            }
+            loading = true; loadedKey = key;
+            msg("Cargando de Sigrid\u2026");
+            let url = "/api/sigrid/contratos?obra=" + encodeURIComponent(obra);
+            const cif = cifActual();
+            if (cif) url += "&cif=" + encodeURIComponent(cif);
+            try {
+                const resp = await fetch(url, { headers: { "Accept": "application/json" } });
+                const data = await resp.json();
+                loading = false;
+                if (!data || !data.ok) {
+                    items = []; loadedKey = null;
+                    msg("\u26a0 " + ((data && data.error) || "Sigrid no disponible") + " \u2014 puedes elegir \u00abSin contrato\u00bb.", "combo-error");
+                    return;
+                }
+                items = (data.items || []).map(function (it) {
+                    const codigo = it.codigo || "";
+                    const prov = it.nombre_proveedor || "";
+                    const label = codigo
+                        + (it.nombre ? " \u2014 " + it.nombre : "")
+                        + (prov ? " \u00b7 " + prov : "");
+                    return { codigo: codigo, label: label, norm: _norm(label) };
+                });
+                applyFilter();
+            } catch (e) {
+                loading = false; items = []; loadedKey = null;
+                msg("\u26a0 Error de red consultando Sigrid \u2014 puedes elegir \u00abSin contrato\u00bb.", "combo-error");
+            }
+        }
+
+        input.addEventListener("focus", function () { input.select(); ensureLoaded(); });
+        input.addEventListener("click", function () { ensureLoaded(); });
+        input.addEventListener("input", function () {
+            if (items.length || loading) applyFilter(); else ensureLoaded();
+        });
+        input.addEventListener("keydown", function (e) {
+            if (e.key === "ArrowDown") {
+                if (panel.hidden) { applyFilter(); return; }
+                activeIdx = Math.min(activeIdx + 1, filtered.length - 1);
+                render(filtered); e.preventDefault();
+            } else if (e.key === "ArrowUp") {
+                activeIdx = Math.max(activeIdx - 1, 0);
+                render(filtered); e.preventDefault();
+            } else if (e.key === "Enter") {
+                if (activeIdx >= 0 && filtered[activeIdx]) {
+                    onPick(filtered[activeIdx].codigo); e.preventDefault();
+                }
+            } else if (e.key === "Escape") {
+                close();
+            }
+        });
+        input.addEventListener("blur", function () { setTimeout(close, 150); });
+        document.addEventListener("click", function (e) {
+            if (!combo.contains(e.target)) close();
+        });
+        window.addEventListener("scroll", function () { if (!panel.hidden) close(); }, true);
+
+        // ---- Estado inicial ----
         const current = (hidden.value || "").trim();
         showCard(current);
         syncHeaderBtn(current || null);
         if (valuateBtn) valuateBtn.disabled = !current;
-
-        // Monta el combo (reutiliza makeLineCombo: combo local, panel fixed,
-        // teclado, normalización sin acentos).
-        const combo = makeLineCombo({
-            placeholder: "Escribe para buscar el contrato…",
-            lines: contratos.map(function (c) {
-                return { id: c.codigo, label: c.label };
-            }),
-            nuevaValue: SIN,
-            nuevaLabel: "🚫 Sin contrato",
-            onPick: function (value) { onPickContrato(value); },
-        });
-        combo.classList.add("js-contrato-combo");
-        mount.appendChild(combo);
-
-        const input = combo.querySelector(".combo-input");
-        if (input) {
-            if (current) {
-                input.value = labelByCodigo[current] || current;
-            } else {
-                input.value = "";
-                input.placeholder = SIN_PLACEHOLDER;
-            }
-            // Al enfocar, seleccionamos el texto para que la primera tecla lo
-            // reemplace (misma UX que el combo de líneas).
-            input.addEventListener("focus", function () { this.select(); });
-        }
+        input.value = current ? (labelByCodigo[current] || current) : "";
+        if (!current) input.placeholder = "Sin contrato \u2014 escribe para buscar en Sigrid\u2026";
 
         async function persistSelection() {
-            // PUT sin navegar: persiste la selección actual (y los campos
-            // editados), igual que el paso 1 de triggerValuate.
             const resp = await fetch(`/api/documents/${documentId}`, {
                 method: "PUT",
                 headers: { "Content-Type": "application/json" },
@@ -1380,59 +1614,57 @@
             });
             if (!resp.ok) {
                 let detail = resp.statusText;
-                try {
-                    const b = await resp.json();
-                    detail = b.detail || detail;
-                } catch (_) {}
+                try { const b = await resp.json(); detail = b.detail || detail; } catch (_) {}
                 throw new Error(detail);
             }
         }
+        async function cacheContratosEnSigrid() {
+            // Re-fetch en sv3: consulta Sigrid por la cif+obra YA guardadas y
+            // cachea contratos + líneas (necesario para poder valorar).
+            try {
+                await fetch(
+                    `/api/documents/${documentId}/re-fetch-contratos`,
+                    { method: "POST", headers: { "Content-Type": "application/json" } }
+                );
+            } catch (_) { /* best-effort: si falla, triggerValuate avisará */ }
+        }
 
-        async function onPickContrato(value) {
-            const sinContrato = (value === SIN || !value);
-            const codigo = sinContrato ? "" : value;
+        async function onPick(codigo) {
+            close();
+            const sinContrato = (codigo === SIN || !codigo);
+            const real = sinContrato ? "" : codigo;
 
-            // 1) Estado visual + hidden (lo leen collectPayload y triggerValuate).
-            hidden.value = codigo;
-            showCard(codigo);
-            syncHeaderBtn(codigo || null);
-            if (input) {
-                if (sinContrato) {
-                    input.value = "";
-                    input.placeholder = SIN_PLACEHOLDER;
-                } else {
-                    input.value = labelByCodigo[codigo] || codigo;
-                }
-            }
+            hidden.value = real;
+            showCard(real);
+            syncHeaderBtn(real || null);
+            input.value = sinContrato ? "" : (labelByCodigo[real] || real);
+            if (sinContrato) input.placeholder = "Sin contrato \u2014 escribe para buscar en Sigrid\u2026";
 
             if (sinContrato) {
-                // 2a) «Sin contrato»: solo guardar (no hay contra qué valorar).
                 if (valuateBtn) valuateBtn.disabled = true;
-                status("loading", "Guardando «Sin contrato»…");
+                status("loading", "Guardando \u00abSin contrato\u00bb\u2026");
                 try {
                     await persistSelection();
-                    status(
-                        "ok",
-                        "Contrato eliminado. Este albarán queda sin " +
-                        "contrato (no se valora)."
-                    );
+                    status("ok", "Contrato eliminado. Este albar\u00e1n queda sin contrato (no se valora).");
                 } catch (exc) {
-                    status(
-                        "error",
-                        "Error al guardar: " + (exc && exc.message || exc)
-                    );
+                    status("error", "Error al guardar: " + (exc && exc.message || exc));
                 }
                 return;
             }
 
-            // 2b) Contrato real: guardar + re-valorar (triggerValuate hace
-            //     PUT + POST /valuate + sondeo y refresca la página al acabar).
             if (valuateBtn) valuateBtn.disabled = false;
-            status("loading", "Contrato seleccionado. Guardando y valorando…");
-            await triggerValuate();
+            status("loading", "Contrato seleccionado. Trayendo de Sigrid y valorando\u2026");
+            try {
+                await persistSelection();          // 1) guarda obra/cif/selected
+                await cacheContratosEnSigrid();     // 2) re-fetch: cachea líneas
+                hidden.value = real;                // 3) re-asegura la selección
+                await triggerValuate();             //    guarda + valora + recarga
+            } catch (exc) {
+                status("error", "Error: " + (exc && exc.message || exc));
+            }
         }
     }
-    wireContratoCombo();
+    initContratoComboRemoto();
 
     // Valoracion INICIAL en segundo plano: la lanza el pipeline
     // (sv7 -> sv6 -> sv5) tras asociar el contrato, NO este boton. Si al
