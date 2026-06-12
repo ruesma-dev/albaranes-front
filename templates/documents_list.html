@@ -212,6 +212,7 @@
                                     <span class="lr-desc">{{ ln.concepto or '—' }}</span>
                                     <span class="lr-cant">{% if ln.cantidad is not none %}{{ '%g'|format(ln.cantidad) }}{% endif %}</span>
                                     <span class="lr-ud">{{ ln.unidad or '' }}</span>
+                                    <span class="lr-uni">{% if ln.precio_unitario is not none %}{{ ln.precio_unitario | importe_eur }}{% endif %}</span>
                                     <span class="lr-imp">{{ ln.importe | importe_eur }}</span>
                                 </div>
                             {% endfor %}

@@ -346,6 +346,38 @@ def build_app(settings: Settings) -> FastAPI:
         items = [{"codigo": o.codigo, "nombre": o.nombre} for o in obras]
         return JSONResponse({"ok": True, "items": items})
 
+    @app.get("/api/sigrid/partidas", include_in_schema=False)
+    def sigrid_partidas(obra: str = Query(default="")) -> JSONResponse:
+        # Partidas HOJA del presupuesto de la obra en Sigrid (obrparpar),
+        # para el desplegable de partida de la fila salmón. SOLO lectura.
+        client = app.state.sigrid_lookup_client
+        if client is None:
+            return JSONResponse(
+                {"ok": False, "error": "Sigrid no configurado en el sv4 "
+                 "(faltan SIGRID_API_*).", "items": []}
+            )
+        codigo = (obra or "").strip()
+        if not codigo:
+            return JSONResponse(
+                {"ok": False, "error": "Falta el codigo de obra.", "items": []}
+            )
+        try:
+            partidas = client.fetch_partidas_por_obra(codigo_obra=codigo)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[sigrid-lookup] partidas obra=%s fallo: %r", codigo, exc)
+            return JSONResponse(
+                {"ok": False, "error": f"Error consultando Sigrid: {exc}", "items": []}
+            )
+        items = [
+            {
+                "codigo": p.codigo,
+                "descripcion": p.descripcion,
+                "descripcion_agregada": p.descripcion_agregada,
+            }
+            for p in partidas
+        ]
+        return JSONResponse({"ok": True, "items": items})
+
     @app.get("/api/sigrid/contratos", include_in_schema=False)
     def sigrid_contratos(
         obra: str = Query(default=""),

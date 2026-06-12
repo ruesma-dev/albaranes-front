@@ -734,16 +734,59 @@
     // Al elegir, se escribe el código y se dispara 'input' para que
     // wireConciliaEdit detecte el cambio.
     // --------------------------------------------------------------- //
-    let PARTIDAS = [];
+    // Partidas del CONTRATO (Postgres) embebidas: SOLO como fallback si
+    // Sigrid no responde o la obra no está fijada.
+    let PARTIDAS_FALLBACK = [];
     (function () {
         const el = document.getElementById("partidas-json");
         if (el) {
-            try { PARTIDAS = JSON.parse(el.textContent || "[]") || []; }
-            catch (_) { PARTIDAS = []; }
+            try { PARTIDAS_FALLBACK = JSON.parse(el.textContent || "[]") || []; }
+            catch (_) { PARTIDAS_FALLBACK = []; }
         }
     })();
 
-    function attachInputCombo(input, items) {
+    // Carga (una sola vez) las partidas HOJA del presupuesto de la obra
+    // desde Sigrid (GET /api/sigrid/partidas?obra=). Devuelve un array
+    // [{code,label,norm}] con label = "codigo · descripción agregada".
+    // Si Sigrid falla, no hay obra, o devuelve vacío, cae a las partidas
+    // del contrato embebidas.
+    let _partidasItems = null;
+    let _partidasPromise = null;
+    function _fallbackPartidas() {
+        return (PARTIDAS_FALLBACK || []).map(function (p) {
+            const c = String(p);
+            return { code: c, label: c, norm: _normLine(c) };
+        });
+    }
+    function loadPartidas() {
+        if (_partidasItems) { return Promise.resolve(_partidasItems); }
+        if (_partidasPromise) { return _partidasPromise; }
+        const obraEl = document.getElementById("obra_codigo");
+        const obra = obraEl ? (obraEl.value || "").trim() : "";
+        if (!obra) {
+            _partidasItems = _fallbackPartidas();
+            return Promise.resolve(_partidasItems);
+        }
+        const url = "/api/sigrid/partidas?obra=" + encodeURIComponent(obra);
+        _partidasPromise = fetch(url, { headers: { "Accept": "application/json" } })
+            .then(function (r) { return r.json(); })
+            .then(function (data) {
+                const items = ((data && data.items) || []).map(function (p) {
+                    const desc = p.descripcion_agregada || p.descripcion || "";
+                    const label = desc ? (p.codigo + "  ·  " + desc) : p.codigo;
+                    return { code: p.codigo, label: label, norm: _normLine(label) };
+                });
+                _partidasItems = items.length ? items : _fallbackPartidas();
+                return _partidasItems;
+            })
+            .catch(function () {
+                _partidasItems = _fallbackPartidas();
+                return _partidasItems;
+            });
+        return _partidasPromise;
+    }
+
+    function attachInputCombo(input) {
         if (!input || input.dataset.comboAttached) { return; }
         input.dataset.comboAttached = "1";
 
@@ -817,15 +860,39 @@
                 window.addEventListener("resize", repos);
             }
         }
-        function open() {
-            if (justPicked) { justPicked = false; return; }
+        function filterAndRender() {
+            const items = _partidasItems || [];
             const tokens = _normLine(input.value).split(/\s+/).filter(Boolean);
-            shown = (items || []).filter(function (it) {
+            shown = items.filter(function (it) {
                 if (!tokens.length) { return true; }
-                const nl = _normLine(it.label);
+                const nl = it.norm || _normLine(it.label);
                 return tokens.every(function (t) { return nl.indexOf(t) !== -1; });
             });
             render();
+        }
+        function open() {
+            if (justPicked) { justPicked = false; return; }
+            if (_partidasItems) { filterAndRender(); return; }
+            // Aún no cargadas: panel con "Cargando…" y disparamos la carga.
+            panel.innerHTML = "";
+            const msg = document.createElement("div");
+            msg.className = "combo-msg";
+            msg.textContent = "Cargando partidas de Sigrid\u2026";
+            panel.appendChild(msg);
+            panel.hidden = false;
+            place();
+            if (!repos) {
+                repos = function (e) {
+                    if (e && e.type === "scroll" && e.target &&
+                        panel.contains(e.target)) { return; }
+                    close();
+                };
+                window.addEventListener("scroll", repos, true);
+                window.addEventListener("resize", repos);
+            }
+            loadPartidas().then(function () {
+                if (!panel.hidden) { filterAndRender(); }
+            });
         }
 
         input.addEventListener("focus", open);
@@ -839,14 +906,10 @@
     }
 
     function wirePartidaCombos() {
-        const items = (PARTIDAS || []).map(function (p) {
-            return { code: String(p), label: String(p) };
-        });
-        if (!items.length) { return; }
         document.querySelectorAll(
             "tr.concilia-editable .js-partida-combo"
         ).forEach(function (inp) {
-            attachInputCombo(inp, items);
+            attachInputCombo(inp);
         });
     }
 

@@ -1291,13 +1291,14 @@ button.concilia-badge.js-concilia-edit:hover {
    los valores de valoración aplicados. Columnas internas de ANCHO FIJO para
    que partida / cantidad-ud / importe queden alineadas en vertical entre
    líneas; la descripción ocupa el resto (ancha). */
-.lineas-cell, .lineas-col { min-width: 460px; }
+.lineas-cell, .lineas-col { min-width: 510px; }
 .linea-rev {
     display: grid;
-    /* partida | descripción | cantidad | unidad | importe — TODAS de
-       ancho fijo, con la misma separación entre ellas (column-gap), para
-       que queden alineadas en vertical entre líneas y sin huecos grandes. */
-    grid-template-columns: 56px 200px 40px 36px 84px;
+    /* partida | descripción | cantidad | unidad | unitario | importe —
+       TODAS de ancho fijo, con la misma separación entre ellas
+       (column-gap), para que queden alineadas en vertical entre líneas y
+       sin huecos grandes. */
+    grid-template-columns: 54px 176px 38px 30px 74px 84px;
     column-gap: 8px;
     align-items: baseline;
     padding: 1px 0 1px 7px;
@@ -1328,6 +1329,12 @@ button.concilia-badge.js-concilia-edit:hover {
     text-align: left;
     white-space: nowrap;
     color: var(--steel);
+}
+.linea-rev .lr-uni {
+    text-align: right;
+    white-space: nowrap;
+    color: var(--ink-soft);
+    font-variant-numeric: tabular-nums;
 }
 .linea-rev .lr-imp {
     text-align: right;

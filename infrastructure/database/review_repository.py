@@ -358,6 +358,7 @@ class AlbaranReviewRepository:
                             "       lv.cantidad_albaran AS cantidad_albaran, "
                             "       lv.unidad_contrato AS unidad_contrato, "
                             "       lv.unidad_albaran AS unidad_albaran, "
+                            "       lv.precio_unitario_final AS precio_unitario_final, "
                             "       lv.importe_calculado AS importe_calculado "
                             "FROM albaran_line_valuations lv "
                             "JOIN albaran_valuations v ON v.id = lv.valuation_id "
@@ -390,6 +391,7 @@ class AlbaranReviewRepository:
                                     lr["unidad_contrato"]
                                     or lr["unidad_albaran"]
                                 ),
+                                precio_unitario=lr["precio_unitario_final"],
                                 importe=lr["importe_calculado"],
                             )
                         )

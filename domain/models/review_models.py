@@ -83,6 +83,7 @@ class DocumentLineSummary(BaseModel):
     concepto: str | None = None
     cantidad: float | None = None
     unidad: str | None = None
+    precio_unitario: float | None = None
     importe: float | None = None
 
 
@@ -163,6 +164,18 @@ class ContratoOption(BaseModel):
     nombre: str | None = None
     cif: str | None = None
     nombre_proveedor: str | None = None
+
+
+class PartidaOption(BaseModel):
+    """Partida HOJA del presupuesto de una obra en Sigrid (obrparpar).
+
+    Solo las partidas sin descomposición (sin hijos); nunca capítulos ni
+    subcapítulos. ``descripcion_agregada`` es la ruta completa de capítulos
+    hasta la partida (capítulo › subcapítulo › … › partida)."""
+
+    codigo: str
+    descripcion: str | None = None
+    descripcion_agregada: str | None = None
 
 
 class ContratoPayload(BaseModel):
