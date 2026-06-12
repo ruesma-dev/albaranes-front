@@ -176,7 +176,7 @@ code {
 .page-shell { padding: clamp(22px, 3vw, 34px) 0 48px; }
 
 /* ---------- Cabeceras de página ------------------------------------------- */
-.page-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 24px; margin-bottom: 24px; }
+.page-header { display: flex; justify-content: space-between; align-items: stretch; gap: 24px; margin-bottom: 24px; }
 .page-header h1, .panel-header h2, .subsection-header h3 { margin: 0; }
 
 .page-eyebrow {
@@ -257,13 +257,17 @@ h1 {
     margin-bottom: 24px;
 }
 
-.stats-grid { display: grid; grid-template-columns: repeat(4, minmax(140px, 1fr)); gap: 12px; width: min(680px, 100%); }
+.stats-grid { display: grid; grid-template-columns: repeat(5, minmax(150px, 1fr)); gap: 14px; width: min(900px, 100%); align-items: stretch; }
 .stat-card {
     position: relative;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    gap: 10px;
     background: var(--paper);
     border: 1px solid var(--line);
     border-radius: 14px;
-    padding: 14px;
+    padding: 18px 18px;
     box-shadow: var(--shadow-sm);
     overflow: hidden;
 }
@@ -279,19 +283,24 @@ h1 {
 .stat-label {
     display: block;
     color: var(--steel);
-    font-size: 0.72rem;
+    font-size: 0.74rem;
     font-weight: 600;
     letter-spacing: 0.08em;
     text-transform: uppercase;
-    margin-bottom: 8px;
+    margin-bottom: 0;
 }
 .stat-card strong {
     font-family: var(--font-display);
     font-weight: 700;
-    font-size: 1.55rem;
+    font-size: 1.95rem;
+    line-height: 1.05;
     letter-spacing: -0.01em;
     font-variant-numeric: tabular-nums;
 }
+/* La tarjeta de importe lleva un número largo (€): fuente algo menor para
+   que quepa sin desbordar. */
+.stat-importe strong { font-size: 1.3rem; white-space: nowrap; }
+.stat-importe::before { background: var(--brand); }
 
 /* ---------- Formularios ----------------------------------------------------- */
 .filters-grid { display: grid; grid-template-columns: repeat(6, minmax(120px, 1fr)); gap: 16px; align-items: end; }
@@ -408,18 +417,24 @@ input[readonly].readonly-cell {
 .docs-table tbody tr:hover td { background: #f8f4f5; }
 
 /* Lista de documentos: la columna "Acciones" queda fija a la izquierda
-   al hacer scroll horizontal de la tabla (.table-scroll). */
+   al hacer scroll horizontal de la tabla (.table-scroll). Sin sombra/borde
+   (quedaba como un recuadro feo). */
 .docs-table th.sticky-col,
 .docs-table td.sticky-col {
     position: sticky;
     left: 0;
     z-index: 1;
     background: var(--paper);
-    box-shadow: 2px 0 4px rgba(29, 32, 36, 0.06);
 }
 .docs-table thead th.sticky-col { z-index: 2; }
+/* El hover de fila también tiñe la columna sticky, a toda la altura. */
+.docs-table tbody tr:hover td.sticky-col { background: #f8f4f5; }
 
-.actions-cell { display: flex; gap: 8px; flex-wrap: wrap; }
+/* La celda <td> de acciones es una celda normal (estira a la altura de
+   fila); el flex va en el div interior, no en el <td> — si el <td> es
+   flex pierde la altura de celda y el fondo/hover queda más corto. */
+.actions-td { vertical-align: top; }
+.actions-cell { display: flex; gap: 8px; flex-wrap: wrap; align-items: flex-start; }
 
 .empty-cell, .empty-state { text-align: center; color: var(--steel); padding: 32px 16px; }
 
@@ -1268,3 +1283,74 @@ button.concilia-badge.js-concilia-edit:hover {
     border-color: #9f2842;
     background: #fff6f1;
 }
+
+/* ---- Listado de líneas salmón en la bandeja (vista rápida, jun 2026) ---- */
+/* Solo lectura: sustituye al nombre de archivo para revisar de un vistazo
+   los valores de valoración aplicados. Columnas internas de ANCHO FIJO para
+   que partida / cantidad-ud / importe queden alineadas en vertical entre
+   líneas; la descripción ocupa el resto (ancha). */
+.lineas-cell, .lineas-col { min-width: 440px; }
+.linea-rev {
+    display: grid;
+    grid-template-columns: 58px minmax(0, 1fr) 132px;  /* partida | descripción | cant·importe */
+    column-gap: 10px;
+    align-items: baseline;
+    padding: 1px 0 1px 7px;
+    border-left: 2px solid #e3a98f;          /* salmón */
+    font-size: 0.72rem;
+    line-height: 1.3;
+}
+.linea-rev + .linea-rev { margin-top: 2px; }
+.linea-rev.is-mod { border-left-color: #d9a13b; }  /* modificador: ámbar */
+.linea-rev .lr-part {
+    color: var(--steel);
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+}
+.linea-rev .lr-desc {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--ink-soft);
+}
+.linea-rev .lr-num {
+    color: var(--ink);
+    white-space: nowrap;
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+}
+.lineas-empty { color: var(--steel-300); font-size: 0.72rem; }
+
+/* ---- Fila de filtros por columna (jun 2026) ---- */
+.docs-table thead tr:first-child th { border-bottom-color: var(--line); }
+.filter-row th {
+    padding: 6px 10px 10px;
+    border-bottom: 1px solid var(--line-strong);
+    vertical-align: top;
+    background: var(--paper);
+}
+.filter-row input,
+.filter-row select {
+    width: 100%;
+    box-sizing: border-box;
+    padding: 5px 8px;
+    font-size: 0.8rem;
+    border: 1px solid var(--line-strong);
+    border-radius: 6px;
+    background: var(--paper);
+    color: var(--ink);
+    /* la cabecera va en mayúsculas/espaciada; los campos NO deben heredarlo */
+    text-transform: none;
+    letter-spacing: normal;
+    font-weight: 400;
+}
+.filter-row input::placeholder { color: var(--steel-300); text-transform: none; }
+.filter-acciones { display: flex; flex-direction: column; gap: 6px; align-items: stretch; }
+.filter-acciones .btn { text-align: center; }
+.filter-confianza { display: flex; gap: 4px; flex-wrap: wrap; }
+.filter-confianza input[type="number"] { width: 52px; flex: 0 0 auto; }
+.filter-confianza select { flex: 1 1 auto; min-width: 96px; }
+.filter-importe { display: flex; gap: 4px; justify-content: flex-end; }
+.filter-importe input[type="number"] { width: 64px; flex: 0 0 auto; text-align: right; }
+.papelera-ico { font-size: 1.3em; vertical-align: -0.12em; line-height: 1; }
+.filter-submit-hidden { position: absolute; left: -9999px; width: 1px; height: 1px; padding: 0; border: 0; }

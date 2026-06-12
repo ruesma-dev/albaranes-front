@@ -25,6 +25,7 @@ from domain.models.review_models import (
     DisplayLine,
     DocumentDetailPayload,
     DocumentListFilters,
+    DocumentLineSummary,
     DocumentListItem,
     KNOWN_PROVIDER_VIEWS,
     LineValuationPayload,
@@ -273,6 +274,26 @@ class AlbaranReviewRepository:
                     AlbaranDocumentMergeOrm.is_active.is_(False)
                 )
             ) or 0
+            # Importe total pendiente de aprobar: suma del total valorado de
+            # los albaranes activos NO aprobados. DISTINCT ON por documento
+            # para no duplicar si hubiera varias valoraciones por documento.
+            try:
+                importe_pendiente_aprobar = session.scalar(
+                    text(
+                        "SELECT COALESCE(SUM(t.total_valorado), 0) FROM ("
+                        "  SELECT DISTINCT ON (av.document_id) "
+                        "         av.document_id, av.total_valorado "
+                        "  FROM albaran_valuations av "
+                        "  JOIN albaran_documents_merge d "
+                        "    ON d.id = av.document_id "
+                        "  WHERE d.is_active = TRUE AND d.approved = FALSE "
+                        "  ORDER BY av.document_id, av.id DESC"
+                        ") t"
+                    )
+                ) or 0.0
+            except Exception:
+                session.rollback()
+                importe_pendiente_aprobar = 0.0
 
             # Columnas nuevas de la lista: importe total valorado (de la
             # valoracion, por document_id) y nombre del contrato seleccionado
@@ -280,6 +301,7 @@ class AlbaranReviewRepository:
             doc_ids = [r.id for r in rows]
             totals_by_doc: dict[str, float | None] = {}
             names_by_code: dict[str, str | None] = {}
+            lines_by_doc: dict[str, list[DocumentLineSummary]] = {}
             if doc_ids:
                 try:
                     for vr in session.execute(
@@ -313,6 +335,67 @@ class AlbaranReviewRepository:
                     except Exception:
                         session.rollback()
 
+                # Líneas salmón (valores de valoración aplicados) de TODOS
+                # los documentos en una sola consulta, para la vista rápida
+                # de la bandeja. Solo lectura. Mismo orden que el detalle:
+                # base (from_albaran) primero, luego sintéticas.
+                try:
+                    for lr in session.execute(
+                        text(
+                            "SELECT v.document_id AS document_id, "
+                            "       lv.line_kind AS line_kind, "
+                            "       lv.codigo_partida_final AS codigo_partida_final, "
+                            "       lv.codigo_partida_albaran AS codigo_partida_albaran, "
+                            # Concepto IGUAL que el detalle: la edición del
+                            # revisor (lv.descripcion_linea) tiene prioridad;
+                            # si está vacía (caso de la línea base), se toma
+                            # la descripción de la línea de contrato casada
+                            # (matched) o derivada (derived).
+                            "       COALESCE(NULLIF(lv.descripcion_linea, ''), "
+                            "                mcl.descripcion_linea, "
+                            "                dcl.descripcion_linea) AS concepto, "
+                            "       lv.cantidad_convertida AS cantidad_convertida, "
+                            "       lv.cantidad_albaran AS cantidad_albaran, "
+                            "       lv.unidad_contrato AS unidad_contrato, "
+                            "       lv.unidad_albaran AS unidad_albaran, "
+                            "       lv.importe_calculado AS importe_calculado "
+                            "FROM albaran_line_valuations lv "
+                            "JOIN albaran_valuations v ON v.id = lv.valuation_id "
+                            "LEFT JOIN albaran_contrato_lines_merge mcl "
+                            "       ON mcl.id = lv.matched_contrato_line_id "
+                            "LEFT JOIN albaran_contrato_lines_merge dcl "
+                            "       ON dcl.id = lv.derived_contrato_line_id "
+                            "WHERE v.document_id IN :ids "
+                            "ORDER BY v.document_id, "
+                            "  CASE WHEN lv.line_kind = 'synthetic_modifier' "
+                            "       THEN 1 ELSE 0 END, "
+                            "  lv.merge_line_id NULLS LAST, lv.id"
+                        ).bindparams(bindparam("ids", expanding=True)),
+                        {"ids": doc_ids},
+                    ).mappings():
+                        _did = lr["document_id"]
+                        _cant = lr["cantidad_convertida"]
+                        if _cant is None:
+                            _cant = lr["cantidad_albaran"]
+                        lines_by_doc.setdefault(_did, []).append(
+                            DocumentLineSummary(
+                                kind=(lr["line_kind"] or "from_albaran"),
+                                codigo_partida=(
+                                    lr["codigo_partida_final"]
+                                    or lr["codigo_partida_albaran"]
+                                ),
+                                concepto=lr["concepto"],
+                                cantidad=_cant,
+                                unidad=(
+                                    lr["unidad_contrato"]
+                                    or lr["unidad_albaran"]
+                                ),
+                                importe=lr["importe_calculado"],
+                            )
+                        )
+                except Exception:
+                    session.rollback()
+
         items = [
             self._to_list_item(
                 row,
@@ -321,6 +404,7 @@ class AlbaranReviewRepository:
                 contrato_nombre=names_by_code.get(
                     getattr(row, "selected_contrato_codigo", None)
                 ),
+                lines=lines_by_doc.get(row.id),
             )
             for row in rows
         ]
@@ -335,6 +419,7 @@ class AlbaranReviewRepository:
             pending_count=int(pending_count),
             review_required_count=int(review_required_count),
             trash_count=int(trash_count),
+            importe_pendiente_aprobar=float(importe_pendiente_aprobar or 0.0),
         )
 
     def _compute_and_persist_confianza(
@@ -2975,6 +3060,7 @@ class AlbaranReviewRepository:
         total_valorado: float | None = None,
         contrato_codigo: str | None = None,
         contrato_nombre: str | None = None,
+        lines: list[DocumentLineSummary] | None = None,
     ) -> DocumentListItem:
         return DocumentListItem(
             id=row.id,
@@ -2994,6 +3080,7 @@ class AlbaranReviewRepository:
             provider_origin=row.provider_origin,
             created_at_utc=row.created_at_utc,
             document_url=AlbaranReviewRepository._document_url(row),
+            lines=lines or [],
         )
 
     @staticmethod
@@ -3020,6 +3107,70 @@ class AlbaranReviewRepository:
             stmt = stmt.where(AlbaranDocumentMergeOrm.approved.is_(True))
         elif filters.approved == "pending":
             stmt = stmt.where(AlbaranDocumentMergeOrm.approved.is_(False))
+        # ---- Filtros por columna (jun 2026) ----
+        if filters.proveedor:
+            stmt = stmt.where(
+                AlbaranDocumentMergeOrm.proveedor_nombre.ilike(
+                    f"%{filters.proveedor.strip()}%"
+                )
+            )
+        if filters.fecha:
+            stmt = stmt.where(
+                AlbaranDocumentMergeOrm.fecha.ilike(f"%{filters.fecha.strip()}%")
+            )
+        if filters.obra:
+            term = f"%{filters.obra.strip()}%"
+            stmt = stmt.where(
+                or_(
+                    AlbaranDocumentMergeOrm.obra_codigo.ilike(term),
+                    AlbaranDocumentMergeOrm.obra_nombre.ilike(term),
+                )
+            )
+        if filters.albaran:
+            stmt = stmt.where(
+                AlbaranDocumentMergeOrm.numero_albaran.ilike(
+                    f"%{filters.albaran.strip()}%"
+                )
+            )
+        if filters.contrato:
+            stmt = stmt.where(
+                AlbaranDocumentMergeOrm.selected_contrato_codigo.ilike(
+                    f"%{filters.contrato.strip()}%"
+                )
+            )
+        if filters.lineas:
+            # Busca en las líneas de valoración (descripción / partida)
+            # mediante un EXISTS correlacionado con el documento.
+            stmt = stmt.where(
+                text(
+                    "EXISTS (SELECT 1 FROM albaran_valuations av "
+                    "  JOIN albaran_line_valuations alv "
+                    "    ON alv.valuation_id = av.id "
+                    "  WHERE av.document_id = albaran_documents_merge.id "
+                    "    AND (alv.descripcion_linea ILIKE :lineas_term "
+                    "      OR alv.codigo_partida_final ILIKE :lineas_term "
+                    "      OR alv.codigo_partida_albaran ILIKE :lineas_term))"
+                ).bindparams(lineas_term=f"%{filters.lineas.strip()}%")
+            )
+        if filters.min_importe is not None or filters.max_importe is not None:
+            # Importe valorado vive en albaran_valuations.total_valorado;
+            # filtramos por EXISTS correlacionado. Los documentos sin
+            # valoración quedan fuera cuando se aplica este filtro.
+            _conds = ["av.document_id = albaran_documents_merge.id"]
+            _params: dict[str, Any] = {}
+            if filters.min_importe is not None:
+                _conds.append("av.total_valorado >= :min_imp")
+                _params["min_imp"] = filters.min_importe
+            if filters.max_importe is not None:
+                _conds.append("av.total_valorado <= :max_imp")
+                _params["max_imp"] = filters.max_importe
+            stmt = stmt.where(
+                text(
+                    "EXISTS (SELECT 1 FROM albaran_valuations av WHERE "
+                    + " AND ".join(_conds)
+                    + ")"
+                ).bindparams(**_params)
+            )
         if filters.review_required == "yes":
             stmt = stmt.where(AlbaranDocumentMergeOrm.review_required.is_(True))
         elif filters.review_required == "no":

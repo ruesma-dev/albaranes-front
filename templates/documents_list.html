@@ -24,6 +24,10 @@
             <span class="stat-label">Revisión requerida</span>
             <strong>{{ result.review_required_count }}</strong>
         </div>
+        <div class="stat-card stat-importe">
+            <span class="stat-label">Importe pendiente</span>
+            <strong>{{ result.importe_pendiente_aprobar | importe_eur }}</strong>
+        </div>
     </div>
 
     {# Soft-delete (jun 2026): acceso a la papelera (albaranes borrados,
@@ -33,59 +37,24 @@
             <a href="/documents?vista=activos" class="btn small secondary">← Volver a activos</a>
             <span class="muted small">Papelera · {{ result.total }} albarán(es) borrado(s). Puedes restaurarlos.</span>
         {% else %}
-            <a href="/documents?vista=papelera&approved=all" class="btn small secondary">🗑 Papelera{% if result.trash_count %} ({{ result.trash_count }}){% endif %}</a>
+            <a href="/documents?vista=papelera&approved=all" class="btn small secondary"><span class="papelera-ico">🗑</span> Papelera{% if result.trash_count %} ({{ result.trash_count }}){% endif %}</a>
         {% endif %}
     </div>
 </section>
 
-<section class="panel">
-    <form method="get" class="filters-grid">
-        <label>
-            <span>Buscar</span>
-            <input type="text" name="search" value="{{ filters.search or '' }}" placeholder="Proveedor, albarán, obra, archivo">
-        </label>
-        <label>
-            <span>Aprobación</span>
-            <select name="approved">
-                <option value="pending" {% if filters.approved == 'pending' %}selected{% endif %}>Pendientes</option>
-                <option value="approved" {% if filters.approved == 'approved' %}selected{% endif %}>Aprobados</option>
-                <option value="all" {% if filters.approved == 'all' %}selected{% endif %}>Todos</option>
-            </select>
-        </label>
-        <label>
-            <span>Revisión requerida</span>
-            <select name="review_required">
-                <option value="all" {% if filters.review_required == 'all' %}selected{% endif %}>Todos</option>
-                <option value="yes" {% if filters.review_required == 'yes' %}selected{% endif %}>Sí</option>
-                <option value="no" {% if filters.review_required == 'no' %}selected{% endif %}>No</option>
-            </select>
-        </label>
-        <label>
-            <span>Confianza mín.</span>
-            <input type="number" step="0.01" min="0" max="100" name="min_confidence" value="{{ filters.min_confidence if filters.min_confidence is not none else '' }}">
-        </label>
-        <label>
-            <span>Confianza máx.</span>
-            <input type="number" step="0.01" min="0" max="100" name="max_confidence" value="{{ filters.max_confidence if filters.max_confidence is not none else '' }}">
-        </label>
-        <label>
-            <span>Tamaño de página</span>
-            <select name="page_size">
-                {% for size in [10, 25, 50, 100] %}
-                    <option value="{{ size }}" {% if filters.page_size == size %}selected{% endif %}>{{ size }}</option>
-                {% endfor %}
-            </select>
-        </label>
+<section class="panel table-panel">
+    {# Filtros por columna (jun 2026): el formulario vive aquí y los inputs
+       de la fila de cabecera lo referencian con form="docFilters". Cada
+       columna tiene así su filtro bajo el título. Enter en un campo de
+       texto envía; los desplegables envían al cambiar. #}
+    <form id="docFilters" method="get">
+        <input type="hidden" name="vista" value="{{ filters.vista }}">
         <input type="hidden" name="sort_by" value="{{ filters.sort_by }}">
         <input type="hidden" name="sort_dir" value="{{ filters.sort_dir }}">
-        <div class="filters-actions">
-            <button type="submit" class="btn primary">Aplicar</button>
-            <a href="/documents" class="btn secondary">Limpiar</a>
-        </div>
+        {# Submit oculto: garantiza que Enter en un campo de texto envíe el
+           formulario (sin botón visible algunos navegadores no lo hacen). #}
+        <button type="submit" class="filter-submit-hidden" tabindex="-1" aria-hidden="true">Filtrar</button>
     </form>
-</section>
-
-<section class="panel table-panel">
     <div class="table-scroll">
         <table class="table docs-table">
             <thead>
@@ -99,13 +68,56 @@
                 <th>Contrato</th>
                 <th><a href="/documents?{{ build_sort_query('confidence_pct_calc') }}">Confianza</a></th>
                 <th><a href="/documents?{{ build_sort_query('approved') }}">Aprobado</a></th>
-                <th>Archivo</th>
+                <th class="lineas-col">Líneas valoradas</th>
+            </tr>
+            <tr class="filter-row">
+                <th class="sticky-col">
+                    <div class="filter-acciones">
+                        <a href="/documents" class="btn small secondary">Limpiar</a>
+                        <select name="page_size" form="docFilters" onchange="this.form.submit()" title="Filas por página" aria-label="Filas por página">
+                            {% for size in [10, 25, 50, 100] %}
+                                <option value="{{ size }}" {% if filters.page_size == size %}selected{% endif %}>{{ size }}/pág</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                </th>
+                <th><input type="text" name="proveedor" value="{{ filters.proveedor or '' }}" form="docFilters" placeholder="Filtrar…"></th>
+                <th><input type="text" name="fecha" value="{{ filters.fecha or '' }}" form="docFilters" placeholder="AAAA-MM-DD"></th>
+                <th><input type="text" name="obra" value="{{ filters.obra or '' }}" form="docFilters" placeholder="Filtrar…"></th>
+                <th><input type="text" name="albaran" value="{{ filters.albaran or '' }}" form="docFilters" placeholder="Filtrar…"></th>
+                <th class="num-cell">
+                    <div class="filter-importe">
+                        <input type="number" step="0.01" min="0" name="min_importe" value="{{ filters.min_importe if filters.min_importe is not none else '' }}" form="docFilters" placeholder="mín" title="Importe mínimo">
+                        <input type="number" step="0.01" min="0" name="max_importe" value="{{ filters.max_importe if filters.max_importe is not none else '' }}" form="docFilters" placeholder="máx" title="Importe máximo">
+                    </div>
+                </th>
+                <th><input type="text" name="contrato" value="{{ filters.contrato or '' }}" form="docFilters" placeholder="Filtrar…"></th>
+                <th>
+                    <div class="filter-confianza">
+                        <input type="number" step="0.01" min="0" max="100" name="min_confidence" value="{{ filters.min_confidence if filters.min_confidence is not none else '' }}" form="docFilters" placeholder="mín" title="Confianza mínima">
+                        <input type="number" step="0.01" min="0" max="100" name="max_confidence" value="{{ filters.max_confidence if filters.max_confidence is not none else '' }}" form="docFilters" placeholder="máx" title="Confianza máxima">
+                        <select name="review_required" form="docFilters" onchange="this.form.submit()" title="Revisión requerida">
+                            <option value="all" {% if filters.review_required == 'all' %}selected{% endif %}>Rev: todas</option>
+                            <option value="yes" {% if filters.review_required == 'yes' %}selected{% endif %}>Rev: sí</option>
+                            <option value="no" {% if filters.review_required == 'no' %}selected{% endif %}>Rev: no</option>
+                        </select>
+                    </div>
+                </th>
+                <th>
+                    <select name="approved" form="docFilters" onchange="this.form.submit()">
+                        <option value="pending" {% if filters.approved == 'pending' %}selected{% endif %}>Pendientes</option>
+                        <option value="approved" {% if filters.approved == 'approved' %}selected{% endif %}>Aprobados</option>
+                        <option value="all" {% if filters.approved == 'all' %}selected{% endif %}>Todos</option>
+                    </select>
+                </th>
+                <th><input type="text" name="lineas" value="{{ filters.lineas or '' }}" form="docFilters" placeholder="Buscar línea…"></th>
             </tr>
             </thead>
             <tbody>
             {% for item in result.items %}
                 <tr>
-                    <td class="actions-cell sticky-col">
+                    <td class="actions-td sticky-col">
+                        <div class="actions-cell">
                         {% if filters.vista == 'papelera' %}
                             <form method="post" action="/documents/{{ item.id }}/restore">
                                 <input type="hidden" name="redirect_query" value="{{ current_query }}">
@@ -139,6 +151,7 @@
                                 <button type="submit" class="btn small danger">Borrar</button>
                             </form>
                         {% endif %}
+                        </div>
                     </td>
                     <td>
                         <a class="link-strong" href="/documents/{{ item.id }}">{{ item.proveedor_nombre or '—' }}</a>
@@ -191,10 +204,17 @@
                             <span class="status-pill pending">Pendiente</span>
                         {% endif %}
                     </td>
-                    <td>
-                        <div>{{ item.source_filename }}</div>
-                        {% if item.source_document_id %}
-                            <div class="muted small">{{ item.source_document_id }}</div>
+                    <td class="lineas-cell" title="{{ item.source_filename }}">
+                        {% if item.lines %}
+                            {% for ln in item.lines %}
+                                <div class="linea-rev{% if ln.kind == 'synthetic_modifier' %} is-mod{% endif %}">
+                                    <span class="lr-part">{{ ln.codigo_partida or '—' }}</span>
+                                    <span class="lr-desc">{{ ln.concepto or '—' }}</span>
+                                    <span class="lr-num">{% if ln.cantidad is not none %}{{ '%g'|format(ln.cantidad) }}{% if ln.unidad %} {{ ln.unidad }}{% endif %} · {% endif %}{{ ln.importe | importe_eur }}</span>
+                                </div>
+                            {% endfor %}
+                        {% else %}
+                            <span class="lineas-empty">Sin valoración</span>
                         {% endif %}
                     </td>
                 </tr>

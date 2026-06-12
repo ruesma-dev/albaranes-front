@@ -12,6 +12,15 @@ ALLOWED_VIEW_MODES = (VIEW_MODE_MERGE, *KNOWN_PROVIDER_VIEWS)
 
 class DocumentListFilters(BaseModel):
     search: str | None = None
+    # Filtros por columna (jun 2026): cada uno filtra su columna.
+    proveedor: str | None = None
+    fecha: str | None = None
+    obra: str | None = None
+    albaran: str | None = None
+    contrato: str | None = None
+    lineas: str | None = None
+    min_importe: float | None = None
+    max_importe: float | None = None
     approved: str = Field(default="pending")
     review_required: str = Field(default="all")
     min_confidence: float | None = None
@@ -64,6 +73,19 @@ class DocumentListFilters(BaseModel):
         return value if value in {"asc", "desc"} else "asc"
 
 
+class DocumentLineSummary(BaseModel):
+    """Resumen compacto de una línea de valoración (línea salmón) para la
+    vista rápida de la bandeja. Solo lectura — no se edita aquí.
+    """
+
+    kind: str = "from_albaran"
+    codigo_partida: str | None = None
+    concepto: str | None = None
+    cantidad: float | None = None
+    unidad: str | None = None
+    importe: float | None = None
+
+
 class DocumentListItem(BaseModel):
     id: str
     source_document_id: str | None = None
@@ -82,6 +104,7 @@ class DocumentListItem(BaseModel):
     provider_origin: str
     created_at_utc: str
     document_url: str | None = None
+    lines: list[DocumentLineSummary] = []
 
 
 class ProviderSnapshot(BaseModel):
@@ -518,6 +541,7 @@ class PaginatedDocuments(BaseModel):
     pending_count: int
     review_required_count: int
     trash_count: int = 0
+    importe_pendiente_aprobar: float = 0.0
 
 
 class SaveResponse(BaseModel):
