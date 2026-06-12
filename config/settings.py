@@ -101,6 +101,10 @@ class Settings(BaseSettings):
         "/v1/events/document-approved",
         alias="SV7_PATH_DOCUMENT_APPROVED",
     )
+    sv7_path_document_purged: str = Field(
+        "/v1/events/document-purged",
+        alias="SV7_PATH_DOCUMENT_PURGED",
+    )
 
     # ------------------------------------------------------------ #
     # Cliente al persistencia/contratos (sv3).

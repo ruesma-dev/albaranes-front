@@ -63,11 +63,42 @@ class ReviewService:
         """Restaura un albarán desde la papelera (is_active=True)."""
         self._repository.restore_document(document_id=document_id)
 
-    def hard_delete_document(self, *, document_id: str) -> None:
+    def hard_delete_document(self, *, document_id: str) -> str | None:
         """Purga DEFINITIVA: borra físicamente el albarán y todo lo que
         cuelga de él (líneas, valoración, contratos asociados, cruda).
-        Irreversible. Pensado para usarse solo desde la papelera."""
-        self._repository.hard_delete_document(document_id=document_id)
+        Irreversible. Pensado para usarse solo desde la papelera.
+
+        Devuelve el ``source_sha256`` del documento purgado (o None) —
+        el endpoint del portal lo reenvía a sv7 en el evento
+        ``document-purged`` para desbloquear el dedup por contenido."""
+        return self._repository.hard_delete_document(document_id=document_id)
+
+    def update_line_conciliacion(
+        self,
+        *,
+        document_id: str,
+        valuation_line_id: int,
+        codigo_partida: str | None = None,
+        descripcion: str | None = None,
+        cantidad: float | None = None,
+        unidad: str | None = None,
+        precio_unitario: float | None = None,
+        descuento: float | None = None,
+        codigo_externo: str | None = None,
+    ) -> bool:
+        """Edición de la fila salmon (ver repositorio para la regla
+        SIGRID→NUEVA al cambiar imputación/unidad/precio)."""
+        return self._repository.update_line_conciliacion(
+            document_id=document_id,
+            valuation_line_id=valuation_line_id,
+            codigo_partida=codigo_partida,
+            descripcion=descripcion,
+            cantidad=cantidad,
+            unidad=unidad,
+            precio_unitario=precio_unitario,
+            descuento=descuento,
+            codigo_externo=codigo_externo,
+        )
 
     def remove_line_conciliacion(
         self,

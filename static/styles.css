@@ -1243,3 +1243,28 @@ button.concilia-badge.js-concilia-edit:hover {
         animation: none !important;
     }
 }
+
+/* ---- Edición de la fila salmon (jun 2026) ---- */
+.conciliacion-row .cell-input {
+    width: 100%;
+    box-sizing: border-box;
+    padding: 3px 6px;
+    font-size: 12px;
+    border: 1px solid #d6cfc4;
+    border-radius: 6px;
+    background: #fffdf9;
+    color: inherit;
+}
+.conciliacion-row .cell-input:focus {
+    outline: none;
+    border-color: #9f2842;
+    background: #fff;
+}
+.conciliacion-row .cell-num { text-align: right; max-width: 110px; }
+.conciliacion-row .cell-short { max-width: 80px; }
+.conciliacion-row .cell-input.cedit-ok { border-color: #6fae7f; }
+.conciliacion-row .cell-input.cedit-warn { border-color: #d9a13b; }
+.conciliacion-row .cell-input.cedit-dirty {
+    border-color: #9f2842;
+    background: #fff6f1;
+}

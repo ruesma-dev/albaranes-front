@@ -1,10 +1,11 @@
 # interface_adapters/web/app.py
 from __future__ import annotations
 
+import calendar
 import html
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlencode
@@ -14,6 +15,7 @@ from fastapi import FastAPI, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from pydantic import BaseModel
 
 from application.services.review_service import ReviewService
 from config.settings import Settings
@@ -84,6 +86,44 @@ def _format_importe_eur(value: Any) -> str:
     formatted = "{:,.2f}".format(number)
     formatted = formatted.replace(",", "X").replace(".", ",").replace("X", ".")
     return f"{formatted} €"
+
+
+def _madrid_local(dt_utc: datetime) -> datetime:
+    """UTC aware -> hora local de Madrid (CET/CEST) aplicando la regla DST
+    de la UE, SIN depender de la base de datos de zonas (tzdata): así
+    funciona igual en local y en Azure Functions. DST: del último domingo
+    de marzo (01:00 UTC) al último domingo de octubre (01:00 UTC) -> UTC+2;
+    el resto del año -> UTC+1.
+    """
+    def _last_sunday_0100(year: int, month: int) -> datetime:
+        last_day = calendar.monthrange(year, month)[1]
+        d = datetime(year, month, last_day, 1, 0, tzinfo=timezone.utc)
+        # weekday(): lunes=0 … domingo=6. Retrocede hasta el domingo.
+        return d - timedelta(days=(d.weekday() - 6) % 7)
+
+    year = dt_utc.year
+    dst_start = _last_sunday_0100(year, 3)
+    dst_end = _last_sunday_0100(year, 10)
+    offset_h = 2 if dst_start <= dt_utc < dst_end else 1
+    return dt_utc + timedelta(hours=offset_h)
+
+
+def _format_fecha_hora_local(value: Any) -> str:
+    """ISO UTC ('2026-03-09T13:32:45.123+00:00') -> 'DD/MM/YYYY HH:MM' en
+    hora de Madrid. Vacío / None / no parseable -> '' (cadena vacía, para
+    que la plantilla pueda omitir la línea).
+    """
+    if not value:
+        return ""
+    try:
+        dt = datetime.fromisoformat(str(value).strip())
+    except (TypeError, ValueError):
+        return ""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    else:
+        dt = dt.astimezone(timezone.utc)
+    return _madrid_local(dt).strftime("%d/%m/%Y %H:%M")
 
 
 # NOTA REFACTOR (mayo 2026): se eliminó aquí
@@ -168,6 +208,7 @@ def build_app(settings: Settings) -> FastAPI:
         base_url=settings.sv7_base_url,
         path_contract_selected=settings.sv7_path_contract_selected,
         path_document_approved=settings.sv7_path_document_approved,
+        path_document_purged=settings.sv7_path_document_purged,
         timeout_s=settings.sv7_timeout_s,
     )
     logger.info(
@@ -219,6 +260,7 @@ def build_app(settings: Settings) -> FastAPI:
     )
     templates.env.filters["fecha_int_iso"] = _format_fecha_int_iso
     templates.env.filters["importe_eur"] = _format_importe_eur
+    templates.env.filters["fecha_hora_local"] = _format_fecha_hora_local
     templates.env.globals["view_label"] = _view_label
     # Cache-buster para CSS/JS: un valor único por arranque del
     # servicio. Cuando reiniciamos sv4, los navegadores ven una URL
@@ -488,7 +530,38 @@ def build_app(settings: Settings) -> FastAPI:
         redirect_query: str = Form(default=""),
     ) -> RedirectResponse:
         # Hard-delete: borrado físico irreversible. Solo desde la papelera.
-        review_service.hard_delete_document(document_id=document_id)
+        source_sha256 = review_service.hard_delete_document(
+            document_id=document_id,
+        )
+
+        # ------------------------------------------------------------ #
+        # FIX (jun 2026) — avisar a sv7 de la purga.
+        #
+        # Sin este evento, los workflow_runs del orquestador seguían
+        # vivos tras el hard-delete y su dedup por attachment_sha256
+        # respondía "PDF ya procesado" al reenviar el mismo albarán,
+        # aunque ya no existía en el portal (bug reportado). sv7 marca
+        # esos workflows como 'purged' y deja de bloquear el contenido.
+        # Best-effort: si sv7 está caído, la purga local YA está hecha;
+        # el operador puede purgar de nuevo otro documento o reintentar.
+        # ------------------------------------------------------------ #
+        now_utc = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        orch: OrchestratorClient = app.state.orchestrator_client
+        outcome = orch.notify_document_purged(
+            document_id=document_id,
+            source_sha256=source_sha256,
+            purged_by=settings.default_reviewer,
+            purged_at_utc=now_utc,
+        )
+        if outcome is None:
+            logger.warning(
+                "[purge] sv7 no confirmó document-purged doc=%s; el "
+                "borrado local SÍ se aplicó. Si reenvías el mismo PDF y "
+                "sv7 lo marca como duplicado, reintenta la purga con sv7 "
+                "levantado.",
+                document_id,
+            )
+
         query = redirect_query.strip()
         message = urlencode({"message": "Albarán eliminado definitivamente"})
         if query:
@@ -795,8 +868,9 @@ def build_app(settings: Settings) -> FastAPI:
         #    timestamp ISO al segundo) → idempotente.
         now_utc = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         client: OrchestratorClient = app.state.orchestrator_client
+        outcome: dict | None = None
         try:
-            client.notify_contract_selected(
+            outcome = client.notify_contract_selected(
                 document_id=document_id,
                 codigo_contrato=codigo_contrato,
                 selected_by=settings.default_reviewer,
@@ -812,19 +886,53 @@ def build_app(settings: Settings) -> FastAPI:
                 document_id, codigo_contrato,
             )
 
+        # ------------------------------------------------------------ #
+        # FIX (jun 2026) — honestidad del "Valorar ahora".
+        #
+        # Antes este endpoint SIEMPRE respondía "Valoración encolada"
+        # aunque sv7 estuviera caído o respondiera action='no_op'
+        # (p.ej. documento sin workflow asociado). El front se quedaba
+        # sondeando 2 minutos una valoración que nunca iba a llegar
+        # (bug reportado: "dice que lanza valorar, pero no lo hace").
+        # Ahora el resultado del orquestador viaja en la respuesta y el
+        # front decide si sondear o avisar del problema.
+        # ------------------------------------------------------------ #
+        orchestrator_ok = outcome is not None
+        action = (outcome or {}).get("action")
+        detail = (outcome or {}).get("detail")
+        if not orchestrator_ok:
+            message = (
+                "No se pudo contactar con el orquestador (sv7). La "
+                "selección de contrato SÍ está guardada; arranca el "
+                "sv7 y pulsa \"Valorar ahora\" de nuevo."
+            )
+        elif action == "no_op":
+            message = (
+                "El orquestador no encontró nada que valorar: "
+                f"{detail or 'sin detalle'}."
+            )
+        else:
+            message = (
+                "Valoración encolada. Refresca la página en unos "
+                "segundos para ver el resultado."
+            )
+
         logger.info(
-            "[valuate][api] document_id=%s codigo=%s reviewer=%s notificado a sv7",
+            "[valuate][api] document_id=%s codigo=%s reviewer=%s "
+            "orchestrator_ok=%s action=%s",
             document_id, codigo_contrato, settings.default_reviewer,
+            orchestrator_ok, action,
         )
         return {
-            "accepted": True,
+            "accepted": orchestrator_ok and action != "no_op",
+            "orchestrator_ok": orchestrator_ok,
+            "orchestrator_action": action,
+            "orchestrator_detail": detail,
+            "workflow_id": (outcome or {}).get("workflow_id"),
             "document_id": document_id,
             "codigo_contrato": codigo_contrato,
             "selected_at_utc": now_utc,
-            "message": (
-                "Valoración encolada. Refresca la página en unos "
-                "segundos para ver el resultado."
-            ),
+            "message": message,
         }
 
     @app.patch(
@@ -856,6 +964,51 @@ def build_app(settings: Settings) -> FastAPI:
             "document_id": document_id,
             "valuation_line_id": valuation_line_id,
             "mode": payload.mode,
+        }
+
+    class ConciliacionEditBody(BaseModel):
+        """Body del PATCH de edición de la fila salmon (jun 2026).
+
+        Todos los campos opcionales: el front manda los visibles. Los
+        numéricos llegan ya como número (el JS convierte coma decimal).
+        """
+
+        codigo_partida: str | None = None
+        descripcion: str | None = None
+        cantidad: float | None = None
+        unidad: str | None = None
+        precio_unitario: float | None = None
+        descuento: float | None = None
+        codigo_externo: str | None = None
+
+    @app.patch(
+        "/api/documents/{document_id}/lines/{valuation_line_id}/conciliacion"
+    )
+    def update_line_conciliacion_api(
+        document_id: str,
+        valuation_line_id: int,
+        payload: ConciliacionEditBody,
+    ) -> dict:
+        ok = review_service.update_line_conciliacion(
+            document_id=document_id,
+            valuation_line_id=valuation_line_id,
+            codigo_partida=payload.codigo_partida,
+            descripcion=payload.descripcion,
+            cantidad=payload.cantidad,
+            unidad=payload.unidad,
+            precio_unitario=payload.precio_unitario,
+            descuento=payload.descuento,
+            codigo_externo=payload.codigo_externo,
+        )
+        if not ok:
+            raise HTTPException(
+                status_code=404,
+                detail="Línea de valoración no encontrada",
+            )
+        return {
+            "ok": True,
+            "document_id": document_id,
+            "valuation_line_id": valuation_line_id,
         }
 
     @app.delete(

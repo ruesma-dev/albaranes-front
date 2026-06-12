@@ -399,7 +399,18 @@
             panel.hidden = false;
             place();
             if (!repos) {
-                repos = function () { close(); };
+                // El panel va FIXED, así que si la página/tabla de detrás
+                // se desplaza hay que cerrarlo (se desancla del input).
+                // PERO el scroll DENTRO del propio panel (rueda o arrastre
+                // del slider) NO debe cerrarlo: antes lo hacía y por eso el
+                // desplegable no se podía scrollear de ninguna forma.
+                repos = function (e) {
+                    if (e && e.type === "scroll" && e.target &&
+                        panel.contains(e.target)) {
+                        return;  // scroll interno: dejar scrollear
+                    }
+                    close();
+                };
                 window.addEventListener("scroll", repos, true);
                 window.addEventListener("resize", repos);
             }
@@ -687,6 +698,251 @@
         });
     }
 
+    // --------------------------------------------------------------- //
+    // Edición de la fila salmon (jun 2026): la línea que se insertará
+    // como albarán en Sigrid.
+    //
+    // - Todos los campos editables (inputs .js-cedit).
+    // - El importe (cant × precio) se refresca en vivo.
+    // - Al guardar: PATCH /lines/{vid}/conciliacion y recarga.
+    // - Si cambian imputación, unidad o precio (data-identity) en una
+    //   fila SIGRID, el backend la convierte a NUEVA conservando el
+    //   resto de campos; se avisa con un confirm antes.
+    // --------------------------------------------------------------- //
+    function parseNumEs(value) {
+        const s = String(value || "").trim();
+        if (!s) return null;
+        const n = parseFloat(s.replace(/\./g, function (m, off, str) {
+            // "1.234,56" → quitar puntos de miles solo si hay coma
+            return str.indexOf(",") !== -1 ? "" : m;
+        }).replace(",", "."));
+        return isNaN(n) ? null : n;
+    }
+
+    // --------------------------------------------------------------- //
+    // Combo de PARTIDA sobre la fila salmon (jun 2026).
+    //
+    // El campo "Código imputación" (partida) de la fila salmon era un
+    // input de texto libre. Ahora se le monta un desplegable con las
+    // partidas que existen en el contrato de Sigrid (deduplicadas) para
+    // elegir en vez de teclear. Reutiliza el CSS del combo de líneas y
+    // el MISMO arreglo de scroll del panel.
+    //
+    // A diferencia de makeLineCombo (que crea su propio input), aquí el
+    // combo se ENGANCHA al input existente .js-partida-combo para que el
+    // valor siga fluyendo por el flujo js-cedit (dirty + guardar PATCH).
+    // Al elegir, se escribe el código y se dispara 'input' para que
+    // wireConciliaEdit detecte el cambio.
+    // --------------------------------------------------------------- //
+    let PARTIDAS = [];
+    (function () {
+        const el = document.getElementById("partidas-json");
+        if (el) {
+            try { PARTIDAS = JSON.parse(el.textContent || "[]") || []; }
+            catch (_) { PARTIDAS = []; }
+        }
+    })();
+
+    function attachInputCombo(input, items) {
+        if (!input || input.dataset.comboAttached) { return; }
+        input.dataset.comboAttached = "1";
+
+        const wrap = document.createElement("div");
+        wrap.className = "combo combo-lines combo-partida";
+        input.parentNode.insertBefore(wrap, input);
+        wrap.appendChild(input);
+        const panel = document.createElement("div");
+        panel.className = "combo-panel";
+        panel.hidden = true;
+        wrap.appendChild(panel);
+
+        let shown = [];
+        let repos = null;
+        let justPicked = false;
+
+        function place() {
+            const r = input.getBoundingClientRect();
+            panel.style.top = (r.bottom + 4) + "px";
+            panel.style.left = r.left + "px";
+            panel.style.minWidth = Math.max(r.width, 200) + "px";
+            panel.style.maxWidth = "480px";
+        }
+        function close() {
+            panel.hidden = true;
+            if (repos) {
+                window.removeEventListener("scroll", repos, true);
+                window.removeEventListener("resize", repos);
+                repos = null;
+            }
+        }
+        function pick(it) {
+            justPicked = true;
+            input.value = it.code;
+            close();
+            // Notificar a wireConciliaEdit: marca dirty, muestra Guardar.
+            input.dispatchEvent(new Event("input", { bubbles: true }));
+            input.focus();
+        }
+        function render() {
+            panel.innerHTML = "";
+            if (!shown.length) {
+                const d = document.createElement("div");
+                d.className = "combo-msg";
+                d.textContent = "Sin coincidencias";
+                panel.appendChild(d);
+            } else {
+                shown.forEach(function (it) {
+                    const d = document.createElement("div");
+                    d.className = "combo-item";
+                    d.textContent = it.label;
+                    d.addEventListener("mousedown", function (e) {
+                        e.preventDefault();
+                        pick(it);
+                    });
+                    panel.appendChild(d);
+                });
+            }
+            panel.hidden = false;
+            place();
+            if (!repos) {
+                // Mismo arreglo que el combo de líneas: el scroll DENTRO
+                // del panel (rueda/slider) no debe cerrarlo; solo el
+                // scroll de la página/tabla de detrás.
+                repos = function (e) {
+                    if (e && e.type === "scroll" && e.target &&
+                        panel.contains(e.target)) { return; }
+                    close();
+                };
+                window.addEventListener("scroll", repos, true);
+                window.addEventListener("resize", repos);
+            }
+        }
+        function open() {
+            if (justPicked) { justPicked = false; return; }
+            const tokens = _normLine(input.value).split(/\s+/).filter(Boolean);
+            shown = (items || []).filter(function (it) {
+                if (!tokens.length) { return true; }
+                const nl = _normLine(it.label);
+                return tokens.every(function (t) { return nl.indexOf(t) !== -1; });
+            });
+            render();
+        }
+
+        input.addEventListener("focus", open);
+        input.addEventListener("click", open);
+        input.addEventListener("input", open);
+        // Nota: NO interceptamos Enter; lo gestiona wireConciliaEdit
+        // (Enter = guardar). El picking es por click en la opción.
+        document.addEventListener("click", function (e) {
+            if (!wrap.contains(e.target)) { close(); }
+        });
+    }
+
+    function wirePartidaCombos() {
+        const items = (PARTIDAS || []).map(function (p) {
+            return { code: String(p), label: String(p) };
+        });
+        if (!items.length) { return; }
+        document.querySelectorAll(
+            "tr.concilia-editable .js-partida-combo"
+        ).forEach(function (inp) {
+            attachInputCombo(inp, items);
+        });
+    }
+
+    function wireConciliaEdit() {
+        linesBody.querySelectorAll("tr.concilia-editable").forEach(function (tr) {
+            const inputs = tr.querySelectorAll(".js-cedit");
+            const saveBtn = tr.querySelector(".js-cedit-save");
+            if (!inputs.length || !saveBtn) return;
+
+            function refreshImporte() {
+                const cantEl = tr.querySelector('[data-field="cantidad"]');
+                const puEl = tr.querySelector('[data-field="precio_unitario"]');
+                const impEl = tr.querySelector(".js-cimporte");
+                if (!impEl) return;
+                const cant = cantEl ? parseNumEs(cantEl.value) : null;
+                const pu = puEl ? parseNumEs(puEl.value) : null;
+                if (cant === null || pu === null) { impEl.textContent = "—"; return; }
+                impEl.textContent = (cant * pu).toLocaleString("es-ES", {
+                    style: "currency", currency: "EUR",
+                });
+            }
+
+            inputs.forEach(function (inp) {
+                inp.addEventListener("input", function () {
+                    inp.classList.toggle("cedit-dirty", inp.value !== inp.defaultValue);
+                    saveBtn.hidden = ![].some.call(
+                        inputs, function (i) { return i.value !== i.defaultValue; }
+                    );
+                    refreshImporte();
+                });
+                // Enter guarda directamente.
+                inp.addEventListener("keydown", function (e) {
+                    if (e.key === "Enter") { e.preventDefault(); saveBtn.click(); }
+                });
+            });
+
+            saveBtn.addEventListener("click", async function () {
+                const vid = (tr.dataset.forValuationLineId || "").trim();
+                if (!vid) return;
+
+                // Aviso de conversión SIGRID → NUEVA si cambió un campo
+                // identitario en una fila assigned.
+                const isSigrid = tr.classList.contains("concilia-assigned");
+                const identityChanged = [].some.call(
+                    tr.querySelectorAll('.js-cedit[data-identity="1"]'),
+                    function (i) { return i.value !== i.defaultValue; }
+                );
+                if (isSigrid && identityChanged) {
+                    if (!window.confirm(
+                        "Has cambiado imputación, unidad o precio: la línea " +
+                        "dejará de ser de Sigrid y pasará a NUEVA (conservando " +
+                        "el resto de campos). ¿Continuar?"
+                    )) return;
+                }
+
+                const body = {};
+                inputs.forEach(function (inp) {
+                    const field = inp.dataset.field;
+                    if (!field) return;
+                    if (inp.dataset.numeric === "1") {
+                        body[field] = parseNumEs(inp.value);
+                    } else {
+                        const v = inp.value.trim();
+                        body[field] = v || null;
+                    }
+                });
+
+                saveBtn.disabled = true;
+                const original = saveBtn.textContent;
+                saveBtn.textContent = "Guardando…";
+                try {
+                    const resp = await fetch(
+                        `/api/documents/${documentId}/lines/${vid}/conciliacion`,
+                        {
+                            method: "PATCH",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify(body),
+                        }
+                    );
+                    if (!resp.ok) {
+                        let detail = resp.statusText;
+                        try { const b = await resp.json(); detail = b.detail || detail; } catch (_) {}
+                        throw new Error(detail);
+                    }
+                    window.location.reload();
+                } catch (exc) {
+                    window.alert("Error al guardar la línea: " + (exc && exc.message || exc));
+                    saveBtn.disabled = false;
+                    saveBtn.textContent = original;
+                }
+            });
+        });
+    }
+    wireConciliaEdit();
+    wirePartidaCombos();
+
     if (addLineBtn) {
         addLineBtn.addEventListener("click", function () {
             const row = buildEmptyRow(linesBody.querySelectorAll("tr").length);
@@ -914,6 +1170,15 @@
             const nEl = document.getElementById(nombreInputId);
             if (vEl) vEl.value = it.val || "";
             if (nEl) nEl.value = it.nombre || "";
+            // FIX (jun 2026): al cambiar de OBRA, la dirección que hay en
+            // pantalla pertenece a la obra anterior. La vaciamos aquí; el
+            // sv3 escribirá la dirección canónica de Sigrid en el
+            // siguiente "Volver a buscar" / selección de contrato (el
+            // refetch ahora refresca obra_nombre + obra_direccion).
+            if (kind === "obra") {
+                const dEl = document.getElementById("obra_direccion");
+                if (dEl) dEl.value = "";
+            }
             input.value = it.label;
             combo.dataset.label = it.label;
             close();
@@ -1357,6 +1622,19 @@
                 paintValuateStatus("error", "Error: " + detail);
                 return;
             }
+            // FIX (jun 2026): el backend ahora informa si el orquestador
+            // (sv7) ACEPTÓ realmente la valoración. Antes el front decía
+            // "Valorando…" y sondeaba 2 minutos aunque sv7 estuviera
+            // caído o hubiera respondido no_op (bug: "dice que lanza
+            // valorar, pero no lo hace"). Si no se aceptó, avisamos con
+            // el motivo y NO sondeamos.
+            if (body && body.accepted === false) {
+                paintValuateStatus(
+                    "error",
+                    body.message || "El orquestador no aceptó la valoración."
+                );
+                return;
+            }
             // Lanzada OK: ahora esperamos (sondeo) a que la valoracion
             // asincrona termine y refrescamos sola la pagina.
             const baselineId = (valuateBtn.dataset.currentValId || "");
@@ -1762,6 +2040,55 @@
         }
     }
 
+    // FIX (jun 2026): tras un re-fetch, el sv3 puede haber canonizado la
+    // cabecera (nombre de proveedor por CIF; nombre + dirección de la
+    // obra) AUNQUE no haya devuelto contratos. Cuando count==0 no se
+    // recarga la página, así que traemos el documento y refrescamos los
+    // inputs + las etiquetas de los combos para que el revisor vea ya
+    // los datos canónicos de Sigrid.
+    async function refreshHeaderFromServer() {
+        try {
+            const resp = await fetch(
+                `/api/documents/${documentId}`,
+                { headers: { "Accept": "application/json" } }
+            );
+            if (!resp.ok) return;
+            const doc = await resp.json();
+            if (!doc) return;
+
+            function setVal(id, value) {
+                const el = document.getElementById(id);
+                if (el) el.value = value || "";
+            }
+            setVal("proveedor_nombre", doc.proveedor_nombre);
+            setVal("proveedor_cif", doc.proveedor_cif);
+            setVal("obra_codigo", doc.obra_codigo);
+            setVal("obra_nombre", doc.obra_nombre);
+            setVal("obra_direccion", doc.obra_direccion);
+
+            const provCombo = document.querySelector(
+                '.combo[data-kind="proveedor"]'
+            );
+            if (provCombo) {
+                const label = (doc.proveedor_nombre || "")
+                    + (doc.proveedor_cif ? " — " + doc.proveedor_cif : "");
+                provCombo.dataset.label = label;
+                const inp = provCombo.querySelector(".combo-input");
+                if (inp) inp.value = label;
+            }
+            const obraCombo = document.querySelector(
+                '.combo[data-kind="obra"]'
+            );
+            if (obraCombo) {
+                const label = (doc.obra_codigo || "")
+                    + (doc.obra_nombre ? " — " + doc.obra_nombre : "");
+                obraCombo.dataset.label = label;
+                const inp = obraCombo.querySelector(".combo-input");
+                if (inp) inp.value = label;
+            }
+        } catch (_) { /* best-effort: la cabecera queda como estaba */ }
+    }
+
     function handleRefetchOutcome(outcome) {
         const kind = {
             found_single: "success",
@@ -1776,6 +2103,9 @@
             setTimeout(function () { window.location.reload(); }, 700);
             return;
         }
+        // Sin contratos: no se recarga, pero la cabecera puede haber
+        // sido canonizada por el sv3 — refrescarla en sitio.
+        refreshHeaderFromServer();
         setButtonsDisabled(false);
     }
 

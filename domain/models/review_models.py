@@ -276,6 +276,10 @@ class LineValuationPayload(BaseModel):
 
     codigo_partida_albaran: str | None = None
     codigo_partida_final: str | None = None
+
+    # ---- edición de la salmon (jun 2026) ----
+    descuento_albaran_aplicado: float | None = None
+    codigo_externo: str | None = None
     partida_action: str | None = None
 
     match_confidence_pct: float | None = None
@@ -369,6 +373,14 @@ class ConciliacionDisplay(BaseModel):
     agree_partida: bool | None = None
     agree_cantidad: bool | None = None
     agree_unitario: bool | None = None
+
+    # ---- edición de la salmon (jun 2026) ----
+    # Campos que NO existen en Sigrid pero que la línea a insertar debe
+    # llevar. Se persisten en albaran_line_valuations (columnas añadidas
+    # por sv4: descuento_albaran_aplicado la crea sv6; codigo_externo es
+    # propia de sv4) y el revisor puede editarlos en la fila salmon.
+    descuento: float | None = None
+    codigo_externo: str | None = None
 
     # Senales para el calculo determinista de CONFIANZA (no se pintan):
     #   match_method / match_confidence_pct -> distinguir match fuerte

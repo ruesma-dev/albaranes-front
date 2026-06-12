@@ -577,7 +577,8 @@
                                (la conciliación se indexa por valuation_line_id). #}
                             {% if dline.concilia %}
                                 {% set c = dline.concilia %}
-                                <tr class="conciliacion-row concilia-{{ c.kind }}"
+                                {% set cedit = document.is_editable and dline.valuation_line_id is not none %}
+                                <tr class="conciliacion-row concilia-{{ c.kind }}{% if cedit %} concilia-editable{% endif %}"
                                     data-for-line-id="{{ dline.merge_line_id if dline.merge_line_id is not none else '' }}"
                                     data-for-valuation-line-id="{{ dline.valuation_line_id if dline.valuation_line_id is not none else '' }}">
                                     {# Col # — origen de la conciliación #}
@@ -601,9 +602,14 @@
                                                     title="Borrar esta linea salmon (no se llevara a Sigrid; deja de sumar al total)">Borrar ✕</button>
                                         {% endif %}
                                     </td>
-                                    {# Col Código imputación — partida del contrato #}
+                                    {# Col Código imputación — partida del contrato.
+                                       Editable (jun 2026): cambiarlo convierte SIGRID→NUEVA. #}
                                     <td class="concilia-td">
-                                        {% if c.agree_partida == true %}
+                                        {% if cedit %}
+                                            <input type="text" class="cell-input js-cedit js-partida-combo{% if c.agree_partida == true %} cedit-ok{% elif c.agree_partida == false %} cedit-warn{% endif %}"
+                                                   data-field="codigo_partida" data-identity="1"
+                                                   value="{{ c.codigo_partida or '' }}" placeholder="—" autocomplete="off">
+                                        {% elif c.agree_partida == true %}
                                             <span class="concilia-price-ok"><span class="concilia-icon" aria-hidden="true">✓</span> {{ c.codigo_partida or '—' }}</span>
                                         {% elif c.agree_partida == false %}
                                             <span class="concilia-price-warn"><span class="concilia-icon" aria-hidden="true">⚠</span> {{ c.codigo_partida or '—' }}</span>
@@ -616,7 +622,12 @@
                                     </td>
                                     {# Col Concepto — descripción de la línea de Sigrid + medición #}
                                     <td class="concilia-td">
-                                        <span class="concilia-val">{{ c.descripcion or '—' }}</span>
+                                        {% if cedit %}
+                                            <input type="text" class="cell-input js-cedit" data-field="descripcion"
+                                                   value="{{ c.descripcion or '' }}" placeholder="—">
+                                        {% else %}
+                                            <span class="concilia-val">{{ c.descripcion or '—' }}</span>
+                                        {% endif %}
                                         {% if c.medicion_total is not none %}
                                             <span class="concilia-sub">
                                                 Medición {{ '%.2f'|format(c.medicion_total) }}{% if c.unidad %} {{ c.unidad }}{% endif %}{% if c.medicion_pendiente is not none %} · Pdte {{ '%.2f'|format(c.medicion_pendiente) }}{% if c.unidad %} {{ c.unidad }}{% endif %}{% endif %}
@@ -632,9 +643,14 @@
                                         </select>
                                         {% endif %}
                                     </td>
-                                    {# Col Cantidad — copiada de la línea de albarán de arriba. #}
+                                    {# Col Cantidad — SIEMPRE la leída del albarán (recepciones
+                                       parciales), no la de Sigrid. Editable. #}
                                     <td class="concilia-td">
-                                        {% if dline.cantidad is not none %}
+                                        {% if cedit %}
+                                            <input type="text" inputmode="decimal" class="cell-input cell-num js-cedit{% if c.agree_cantidad == true %} cedit-ok{% elif c.agree_cantidad == false %} cedit-warn{% endif %}"
+                                                   data-field="cantidad" data-numeric="1"
+                                                   value="{{ dline.cantidad if dline.cantidad is not none else '' }}" placeholder="—">
+                                        {% elif dline.cantidad is not none %}
                                             {% if c.agree_cantidad == true %}
                                                 <span class="concilia-price-ok"><span class="concilia-icon" aria-hidden="true">✓</span> {{ dline.cantidad }}</span>
                                             {% elif c.agree_cantidad == false %}
@@ -644,13 +660,22 @@
                                             {% endif %}
                                         {% else %}—{% endif %}
                                     </td>
-                                    {# Col Unidad #}
-                                    <td class="concilia-td">{{ c.unidad or '—' }}</td>
+                                    {# Col Unidad — editable; cambiarla convierte SIGRID→NUEVA. #}
+                                    <td class="concilia-td">
+                                        {% if cedit %}
+                                            <input type="text" class="cell-input cell-short js-cedit" data-field="unidad" data-identity="1"
+                                                   value="{{ c.unidad or '' }}" placeholder="—">
+                                        {% else %}{{ c.unidad or '—' }}{% endif %}
+                                    </td>
                                     {# Col Precio unitario — PRECIO DEL CONTRATO DE SIGRID, alineado
                                        con el precio valorado de la fila de arriba. Verde si cuadra,
                                        rojo si difiere. #}
                                     <td class="concilia-td">
-                                        {% if c.agree_unitario == true %}
+                                        {% if cedit %}
+                                            <input type="text" inputmode="decimal" class="cell-input cell-num js-cedit{% if c.agree_unitario == true %} cedit-ok{% elif c.agree_unitario == false %} cedit-warn{% endif %}"
+                                                   data-field="precio_unitario" data-identity="1" data-numeric="1"
+                                                   value="{{ '%.4f'|format(c.unitario) if c.unitario is not none else '' }}" placeholder="—">
+                                        {% elif c.agree_unitario == true %}
                                             <span class="concilia-price-ok"><span class="concilia-icon" aria-hidden="true">✓</span> {{ c.unitario | importe_eur }}</span>
                                         {% elif c.agree_unitario == false %}
                                             <span class="concilia-price-warn"><span class="concilia-icon" aria-hidden="true">⚠</span> {{ c.unitario | importe_eur }}</span>
@@ -668,17 +693,33 @@
                                             {% elif c.agree_importe == false %}
                                                 <span class="concilia-price-warn"><span class="concilia-icon" aria-hidden="true">⚠</span> {{ (dline.cantidad * c.unitario) | importe_eur }}</span>
                                             {% else %}
-                                                <span class="concilia-val">{{ (dline.cantidad * c.unitario) | importe_eur }}</span>
+                                                <span class="concilia-val js-cimporte">{{ (dline.cantidad * c.unitario) | importe_eur }}</span>
                                             {% endif %}
                                             <span class="concilia-sub">cant × precio contrato</span>
-                                        {% else %}—{% endif %}
+                                        {% else %}<span class="concilia-val js-cimporte">—</span>{% endif %}
                                     </td>
-                                    {# Col Descuento — n/a #}
-                                    <td class="concilia-td concilia-muted">—</td>
-                                    {# Col Código — n/a #}
-                                    <td class="concilia-td concilia-muted"></td>
-                                    {# Col acciones — vacía #}
-                                    <td class="concilia-td"></td>
+                                    {# Col Descuento — campo NUEVO (jun 2026): no existe en
+                                       Sigrid; viajará con la línea al insertar el albarán. #}
+                                    <td class="concilia-td">
+                                        {% if cedit %}
+                                            <input type="text" inputmode="decimal" class="cell-input cell-num js-cedit" data-field="descuento" data-numeric="1"
+                                                   value="{{ c.descuento if c.descuento is not none else '' }}" placeholder="—">
+                                        {% else %}{{ c.descuento if c.descuento is not none else '—' }}{% endif %}
+                                    </td>
+                                    {# Col Código — campo NUEVO (jun 2026): idem. #}
+                                    <td class="concilia-td">
+                                        {% if cedit %}
+                                            <input type="text" class="cell-input cell-short js-cedit" data-field="codigo_externo"
+                                                   value="{{ c.codigo_externo or '' }}" placeholder="—">
+                                        {% else %}{{ c.codigo_externo or '' }}{% endif %}
+                                    </td>
+                                    {# Col acciones — botón Guardar (aparece al editar) #}
+                                    <td class="concilia-td">
+                                        {% if cedit %}
+                                            <button type="button" class="btn small success js-cedit-save" hidden
+                                                    title="Guardar los cambios de esta línea. Si has cambiado imputación, unidad o precio, la línea pasará de Sigrid a Nueva conservando el resto de campos.">Guardar</button>
+                                        {% endif %}
+                                    </td>
                                 </tr>
                             {% endif %}
                         {% endfor %}
@@ -687,6 +728,16 @@
                     {# Lineas de contrato disponibles, para construir el
                        desplegable al pulsar "+" en una linea no casada. #}
                     <script type="application/json" id="contrato-lines-json">[{% for cl in document.contrato_lines %}{"id": {{ cl.id }}, "label": {{ ((cl.codigo_partida or '—') ~ ' · ' ~ (cl.descripcion or '') ~ ' · ' ~ (('%.2f'|format(cl.precio_unitario) ~ ' €') if cl.precio_unitario is not none else '—')) | tojson }}}{% if not loop.last %},{% endif %}{% endfor %}]</script>
+                    {# Partidas DISTINTAS presentes en el contrato de Sigrid,
+                       para el desplegable del campo partida de la fila salmon.
+                       Se deduplican y ordenan en Jinja. #}
+                    {%- set _pns = namespace(parts=[]) -%}
+                    {%- for cl in document.contrato_lines -%}
+                      {%- if cl.codigo_partida and cl.codigo_partida not in _pns.parts -%}
+                        {%- set _pns.parts = _pns.parts + [cl.codigo_partida] -%}
+                      {%- endif -%}
+                    {%- endfor -%}
+                    <script type="application/json" id="partidas-json">{{ _pns.parts | sort | tojson }}</script>
                 </div>
             </form>
         {% else %}

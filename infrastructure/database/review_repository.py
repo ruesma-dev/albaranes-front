@@ -140,6 +140,13 @@ class AlbaranReviewRepository:
             "ALTER TABLE albaran_documents_merge ADD COLUMN IF NOT EXISTS deleted_at_utc VARCHAR(64)",
             "ALTER TABLE albaran_documents_merge ADD COLUMN IF NOT EXISTS deleted_by VARCHAR(255)",
             "ALTER TABLE albaran_contratos_merge ADD COLUMN IF NOT EXISTS gra_rep_ide INTEGER",
+            # Edición de la línea salmon (jun 2026): campos que viajarán a
+            # Sigrid al insertar el albarán pero que no existen allí.
+            # descuento_albaran_aplicado la crea sv6 en BBDD nuevas; la
+            # añadimos defensivamente para BBDD antiguas. codigo_externo es
+            # exclusiva de sv4 (sv6 no la toca: queda NULL al re-valorar).
+            "ALTER TABLE albaran_line_valuations ADD COLUMN IF NOT EXISTS descuento_albaran_aplicado DOUBLE PRECISION",
+            "ALTER TABLE albaran_line_valuations ADD COLUMN IF NOT EXISTS codigo_externo VARCHAR(64)",
             (
                 "ALTER TABLE albaran_contratos_merge "
                 "ADD COLUMN IF NOT EXISTS pdf_sharepoint_relative_path VARCHAR(1024)"
@@ -720,7 +727,9 @@ class AlbaranReviewRepository:
                     # ----- sub-tanda 2D: campos de líneas sintéticas -----
                     "       line_kind, parent_merge_line_id, "
                     "       modifier_source, modifier_reason, "
-                    "       descripcion_linea "
+                    "       descripcion_linea, "
+                    # ----- edición salmon (jun 2026) -----
+                    "       descuento_albaran_aplicado, codigo_externo "
                     "FROM albaran_line_valuations "
                     "WHERE valuation_id = :vid "
                     # from_albaran primero (para poder iterar base, luego
@@ -826,6 +835,12 @@ class AlbaranReviewRepository:
                 modifier_source=modifier_source,
                 modifier_reason=modifier_reason,
                 descripcion_linea=descripcion_linea,
+                # --- edición salmon (jun 2026) ---
+                descuento_albaran_aplicado=row.get(
+                    "descuento_albaran_aplicado"
+                ) if hasattr(row, "get") else row["descuento_albaran_aplicado"],
+                codigo_externo=row.get("codigo_externo")
+                if hasattr(row, "get") else row["codigo_externo"],
             )
 
             if line_kind == "synthetic_modifier":
@@ -952,9 +967,15 @@ class AlbaranReviewRepository:
             for vid in matched_to_vlines.get(row["id"], []):
                 unitario = row.get("precio_unitario")
                 precio_final = precio_final_by_vline.get(vid)
+                _vl = vline_by_vid.get(vid)
+                # Edición salmon (jun 2026): si el revisor editó la
+                # descripción de una fila Sigrid SIN convertirla a Nueva,
+                # quedó guardada en lv.descripcion_linea (sv6 la deja a
+                # NULL en líneas from_albaran, así que no hay colisión).
+                _desc_override = getattr(_vl, "descripcion_linea", None)
                 out[vid] = ConciliacionDisplay(
                     kind="assigned",
-                    descripcion=row.get("descripcion_linea"),
+                    descripcion=_desc_override or row.get("descripcion_linea"),
                     unitario=unitario,
                     medicion_total=row.get("uds"),
                     medicion_pendiente=row.get("pendiente_servir"),
@@ -971,6 +992,10 @@ class AlbaranReviewRepository:
                     precio_unitario_source=getattr(
                         vline_by_vid.get(vid), "precio_unitario_source", None
                     ),
+                    descuento=getattr(
+                        _vl, "descuento_albaran_aplicado", None
+                    ),
+                    codigo_externo=getattr(_vl, "codigo_externo", None),
                 )
 
         # Paso 3: líneas derived (creadas por el valorador) en bloque.
@@ -1000,6 +1025,14 @@ class AlbaranReviewRepository:
                         vline_by_vid.get(vid), "precio_unitario_source", None
                     ),
                     derived_origen=row.get("origen"),
+                    descuento=getattr(
+                        vline_by_vid.get(vid),
+                        "descuento_albaran_aplicado",
+                        None,
+                    ),
+                    codigo_externo=getattr(
+                        vline_by_vid.get(vid), "codigo_externo", None
+                    ),
                 )
 
         return out
@@ -1264,6 +1297,266 @@ class AlbaranReviewRepository:
                 )
             else:
                 return False
+
+            # Recalcular total de la cabecera.
+            session.execute(
+                text(
+                    "UPDATE albaran_valuations SET "
+                    "  total_valorado = COALESCE((SELECT SUM(importe_calculado) "
+                    "    FROM albaran_line_valuations WHERE valuation_id = :vid), 0), "
+                    "  updated_at_utc = :now "
+                    "WHERE id = :vid"
+                ),
+                {"vid": valuation_id, "now": self._utc_iso()},
+            )
+            session.commit()
+            return True
+
+    def update_line_conciliacion(
+        self,
+        *,
+        document_id: str,
+        valuation_line_id: int,
+        codigo_partida: str | None = None,
+        descripcion: str | None = None,
+        cantidad: float | None = None,
+        unidad: str | None = None,
+        precio_unitario: float | None = None,
+        descuento: float | None = None,
+        codigo_externo: str | None = None,
+    ) -> bool:
+        """Edición de la fila salmon (jun 2026): la línea que se
+        insertará como albarán en Sigrid.
+
+        Regla pactada con el cliente:
+          - Todos los campos son editables.
+          - descuento y codigo_externo NO existen en Sigrid: se guardan
+            en la valoración sea cual sea el tipo de la línea.
+          - cantidad: por defecto la leída del albarán (recepciones
+            parciales); editarla actualiza cantidad_albaran y el importe.
+          - Si cambian codigo_partida (imputación), unidad o
+            precio_unitario en una fila SIGRID (matched), la línea se
+            CONVIERTE en NUEVA (derivada manual) conservando el resto de
+            campos tal y como estaban en ese momento (descripción,
+            cantidad, descuento, etc.).
+          - En una fila NUEVA (derived) se edita in situ.
+
+        NO revalora. Como todo override manual, se pierde si después se
+        pulsa "Valorar ahora". Devuelve True si actualizó algo.
+        """
+        self.initialize()
+
+        def _num_eq(a: float | None, b: float | None) -> bool:
+            if a is None and b is None:
+                return True
+            if a is None or b is None:
+                return False
+            return abs(float(a) - float(b)) < 1e-9
+
+        def _txt(v: str | None) -> str:
+            return (v or "").strip()
+
+        with self._session_factory.create_session() as session:
+            row = session.execute(
+                text(
+                    "SELECT lv.id, lv.merge_line_id, lv.valuation_id, "
+                    "       lv.matched_contrato_line_id, "
+                    "       lv.derived_contrato_line_id, "
+                    "       lv.cantidad_albaran, lv.cantidad_convertida, "
+                    "       lv.codigo_partida_final, lv.descripcion_linea, "
+                    "       lv.precio_unitario_final, lv.unidad_contrato, "
+                    "       v.document_id, v.contrato_codigo "
+                    "FROM albaran_line_valuations lv "
+                    "JOIN albaran_valuations v ON v.id = lv.valuation_id "
+                    "WHERE lv.id = :vid"
+                ),
+                {"vid": valuation_line_id},
+            ).mappings().first()
+            if row is None or row["document_id"] != document_id:
+                return False
+
+            valuation_id = row["valuation_id"]
+            matched_id = row["matched_contrato_line_id"]
+            derived_id = row["derived_contrato_line_id"]
+
+            # ---- estado ACTUAL de la conciliación (para comparar) ----
+            cur_codigo_partida = row["codigo_partida_final"]
+            cur_unidad = row["unidad_contrato"]
+            cur_precio = row["precio_unitario_final"]
+            cur_desc = row["descripcion_linea"]  # override si lo hubiera
+            linea_casada = None
+            if matched_id is not None:
+                linea_casada = session.execute(
+                    text(
+                        "SELECT codigo_partida, descripcion_linea, "
+                        "       unidad_medida, precio_unitario "
+                        "FROM albaran_contrato_lines_merge WHERE id = :id"
+                    ),
+                    {"id": matched_id},
+                ).mappings().first()
+            elif derived_id is not None:
+                linea_casada = session.execute(
+                    text(
+                        "SELECT codigo_partida, descripcion_linea, "
+                        "       unidad_medida, precio_unitario "
+                        "FROM contrato_lines_derived WHERE id = :id"
+                    ),
+                    {"id": derived_id},
+                ).mappings().first()
+            if linea_casada is not None:
+                cur_codigo_partida = (
+                    cur_codigo_partida or linea_casada["codigo_partida"]
+                )
+                cur_unidad = cur_unidad or linea_casada["unidad_medida"]
+                if cur_precio is None:
+                    cur_precio = linea_casada["precio_unitario"]
+                if not cur_desc:
+                    cur_desc = linea_casada["descripcion_linea"]
+
+            # ---- valores RESULTANTES (editado o actual) ----
+            new_codigo_partida = (
+                _txt(codigo_partida) or None
+                if codigo_partida is not None
+                else cur_codigo_partida
+            )
+            new_unidad = (
+                _txt(unidad) or None if unidad is not None else cur_unidad
+            )
+            new_precio = (
+                precio_unitario if precio_unitario is not None else cur_precio
+            )
+            new_desc = (
+                _txt(descripcion) or None
+                if descripcion is not None
+                else cur_desc
+            )
+            new_cantidad = (
+                cantidad
+                if cantidad is not None
+                else (
+                    row["cantidad_convertida"]
+                    if row["cantidad_convertida"] is not None
+                    else row["cantidad_albaran"]
+                )
+            )
+
+            identity_changed = (
+                _txt(new_codigo_partida) != _txt(cur_codigo_partida)
+                or _txt(new_unidad) != _txt(cur_unidad)
+                or not _num_eq(new_precio, cur_precio)
+            )
+
+            importe = (
+                round(float(new_precio) * float(new_cantidad), 2)
+                if new_precio is not None and new_cantidad is not None
+                else None
+            )
+
+            extra_sets = ""
+            params: dict[str, Any] = {
+                "vid": valuation_line_id,
+                "cant": new_cantidad,
+                "pu": new_precio,
+                "imp": importe,
+                "part": new_codigo_partida,
+                "uni": new_unidad,
+                "dto": descuento,
+                "codext": _txt(codigo_externo) or None,
+            }
+
+            if matched_id is not None and identity_changed:
+                # SIGRID → NUEVA: derivada manual con los valores
+                # resultantes; se conserva todo lo demás tal cual.
+                new_derived_id = session.execute(
+                    text(
+                        "INSERT INTO contrato_lines_derived ("
+                        "  created_by_valuation_id, source_document_id, "
+                        "  codigo_contrato, codigo_producto, "
+                        "  descripcion_linea, unidad_medida, "
+                        "  precio_unitario, codigo_partida, "
+                        "  origen, created_at_utc) "
+                        "VALUES (:vid, :doc, :cod, NULL, :desc, :uni, :pu, "
+                        "  :part, 'manual_override', :now) "
+                        "RETURNING id"
+                    ),
+                    {
+                        "vid": valuation_id,
+                        "doc": document_id,
+                        "cod": row["contrato_codigo"] or "",
+                        "desc": new_desc,
+                        "uni": new_unidad,
+                        "pu": new_precio,
+                        "part": new_codigo_partida,
+                        "now": self._utc_iso(),
+                    },
+                ).scalar_one()
+                extra_sets = (
+                    ", matched_contrato_line_id = NULL"
+                    ", derived_contrato_line_id = :did"
+                    ", precio_unitario_source = 'manual_derived'"
+                    ", precio_unitario_agreement = 'manual'"
+                    ", descripcion_linea = NULL"
+                )
+                params["did"] = new_derived_id
+            elif derived_id is not None:
+                # NUEVA: edición in situ de la derivada.
+                session.execute(
+                    text(
+                        "UPDATE contrato_lines_derived SET "
+                        "  codigo_partida = :part, "
+                        "  descripcion_linea = :desc, "
+                        "  unidad_medida = :uni, "
+                        "  precio_unitario = :pu "
+                        "WHERE id = :did"
+                    ),
+                    {
+                        "part": new_codigo_partida,
+                        "desc": new_desc,
+                        "uni": new_unidad,
+                        "pu": new_precio,
+                        "did": derived_id,
+                    },
+                )
+                extra_sets = (
+                    ", precio_unitario_source = 'manual_derived'"
+                    ", precio_unitario_agreement = 'manual'"
+                    ", descripcion_linea = NULL"
+                )
+            elif matched_id is not None:
+                # SIGRID sin cambio identitario: solo cantidad,
+                # descuento, código y (si difiere) override de
+                # descripción; la línea SIGUE siendo Sigrid.
+                desc_override = (
+                    new_desc
+                    if _txt(new_desc)
+                    and linea_casada is not None
+                    and _txt(new_desc)
+                    != _txt(linea_casada["descripcion_linea"])
+                    else None
+                )
+                extra_sets = ", descripcion_linea = :descov"
+                params["descov"] = desc_override
+            else:
+                return False
+
+            session.execute(
+                text(
+                    "UPDATE albaran_line_valuations SET "
+                    "  cantidad_albaran = :cant, "
+                    "  cantidad_convertida = NULL, "
+                    "  precio_unitario_final = :pu, "
+                    "  unidad_contrato = :uni, "
+                    "  codigo_partida_final = :part, "
+                    "  importe_calculado = :imp, "
+                    "  importe_source = 'calculated', "
+                    "  descuento_albaran_aplicado = :dto, "
+                    "  codigo_externo = :codext, "
+                    "  review_required = FALSE "
+                    + extra_sets
+                    + " WHERE id = :vid"
+                ),
+                params,
+            )
 
             # Recalcular total de la cabecera.
             session.execute(
@@ -2250,7 +2543,7 @@ class AlbaranReviewRepository:
     # los schemas de sv3 (cruda/contratos) y sv6 (valoración); es pragmático
     # porque sv4 ya lee esas tablas y comparten BBDD.
     # ------------------------------------------------------------------ #
-    def hard_delete_document(self, *, document_id: str) -> None:
+    def hard_delete_document(self, *, document_id: str) -> str | None:
         self.initialize()
         with self._session_factory.create_session() as session:
             document = session.get(AlbaranDocumentMergeOrm, document_id)
@@ -2321,6 +2614,10 @@ class AlbaranReviewRepository:
                         session.execute(text(sql), {"sha": source_sha256})
 
             session.commit()
+            # Devolvemos el sha del archivo purgado: el endpoint del
+            # portal lo reenvía a sv7 en el evento document-purged para
+            # que el guard de idempotencia deje de bloquear el mismo PDF.
+            return source_sha256
 
     def build_query_string(
         self,
@@ -2440,8 +2737,27 @@ class AlbaranReviewRepository:
             eff_codimp = line.codigo_imputacion
             eff_cantidad = line.cantidad
             eff_unidad = None
+            # Regla general: la fila blanca muestra lo LEÍDO del albarán
+            # (line.precio / line.precio_neto). PERO hay albaranes que NO
+            # traen precio en sus líneas — el caso típico es el HORMIGÓN:
+            # la línea del albarán llega con precio=NULL y precio_neto=NULL
+            # porque el precio lo pone el CONTRATO, no el albarán. En ese
+            # caso la fila principal salía con precio e importe VACÍOS aun
+            # cuando la valoración SÍ los había calculado (el importe entra
+            # en el total pero no se veía en la línea base). 
+            #
+            # Fix (jun 2026): si el albarán no trajo precio/importe en la
+            # línea, la fila principal hereda el valor de la valoración
+            # (precio_unitario_final / importe_calculado). Esto NO pisa lo
+            # leído del albarán cuando sí existe (se mantiene el modelo
+            # "la salmon no modifica la blanca"): el fallback solo actúa
+            # cuando el dato del albarán es None.
             eff_precio_unit = line.precio
+            if eff_precio_unit is None and v is not None:
+                eff_precio_unit = v.precio_unitario_final
             eff_importe = line.precio_neto
+            if eff_importe is None and v is not None:
+                eff_importe = v.importe_calculado
 
             _conc = (
                 conc_map.get(v.valuation_line_id)

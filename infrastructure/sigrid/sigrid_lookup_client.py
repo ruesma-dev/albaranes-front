@@ -20,14 +20,15 @@ _LOG_PREFIX = "[sigrid-lookup]"
 # Construcciones Ruesma), igual que el contrato-client.
 _SQL_PROVEEDORES_POR_OBRA = """\
 SELECT DISTINCT
-    ctr.entcif AS cif,
-    ctr.entres AS nombre
+    prv.cif AS cif,
+    prv.raz AS nombre
 FROM ctr
 JOIN con AS con_ctr ON ctr.ide    = con_ctr.ide
 JOIN con AS con_obr ON ctr.obride = con_obr.ide
+JOIN prv            ON ctr.entide = prv.ide
 WHERE con_obr.cod = ?
   AND con_ctr.emp = 1
-ORDER BY ctr.entres
+ORDER BY prv.raz
 """
 
 # Lista de obras (codigo + nombre). Mismo join que el obra-client del sv3
@@ -61,10 +62,11 @@ SELECT
     con_ctr.cod AS codigo,
     con_ctr.res AS nombre,
     ctr.entcif  AS cif,
-    ctr.entres  AS nombre_proveedor
+    prv.raz     AS nombre_proveedor
 FROM ctr
 JOIN con AS con_ctr ON ctr.ide    = con_ctr.ide
 JOIN con AS con_obr ON ctr.obride = con_obr.ide
+JOIN prv            ON ctr.entide = prv.ide
 WHERE con_obr.cod = ?
   AND con_ctr.emp = 1
 ORDER BY con_ctr.cod
