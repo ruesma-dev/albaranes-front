@@ -95,107 +95,6 @@
     }
 
     // --------------------------------------------------------------- //
-    // Crear una fila nueva (usada al pulsar "Añadir línea"). Los campos
-    // de valoración ('unidad_display', 'precio_unitario_display') se
-    // crean readonly y vacíos: nunca habrá valoración para filas que
-    // acaba de añadir el usuario hasta que el servicio 6 vuelva a
-    // pasar (fuera del alcance de esta pasada).
-    //
-    // Orden de columnas:
-    //   # | Cód imput. | Concepto | Cantidad | Unidad |
-    //     Precio unit. | Importe | Descuento | Código | [Acciones]
-    // Más un input HIDDEN para 'precio' (extraído del albarán) que
-    // viaja en el payload al guardar pero no ocupa celda visual.
-    // --------------------------------------------------------------- //
-    function buildEmptyRow(index) {
-        const tr = document.createElement("tr");
-        tr.dataset.lineId = "";
-        // Sub-tanda 2D: filas nuevas son siempre del albarán-merge.
-        // Las sintéticas solo las crea el valorador.
-        tr.dataset.lineKind = "from_albaran";
-        tr.dataset.valuationLineId = "";
-
-        function cell(inner) {
-            const td = document.createElement("td");
-            td.appendChild(inner);
-            tr.appendChild(td);
-        }
-
-        function txt(field) {
-            const el = document.createElement("input");
-            el.type = "text";
-            el.dataset.field = field;
-            return el;
-        }
-        function num(field) {
-            const el = document.createElement("input");
-            el.type = "number";
-            el.step = "any";
-            el.dataset.field = field;
-            return el;
-        }
-        function area(field) {
-            const el = document.createElement("textarea");
-            el.dataset.field = field;
-            return el;
-        }
-        function ro(field) {
-            const el = document.createElement("input");
-            el.type = "text";
-            el.dataset.field = field;
-            el.readOnly = true;
-            el.className = "readonly-cell";
-            return el;
-        }
-
-        const idxCell = document.createElement("td");
-        idxCell.textContent = String(index + 1);
-        tr.appendChild(idxCell);
-
-        cell(txt("codigo_imputacion"));
-        cell(area("concepto"));
-        cell(num("cantidad"));
-        cell(ro("unidad_display"));
-        cell(ro("precio_unitario_display"));
-        // Importe (el template V3 usa data-field=importe; al enviar al
-        // backend collectLinesAndValuationUpdates lo mapea a precio_neto).
-        cell(num("importe"));
-        cell(num("descuento"));
-        cell(txt("codigo"));
-
-        // 'precio' (del albarán) sobrevive oculto, como input hidden
-        // pegado a la primera celda para que siga en el form.
-        const hiddenPrecio = document.createElement("input");
-        hiddenPrecio.type = "hidden";
-        hiddenPrecio.dataset.field = "precio";
-        tr.firstChild.appendChild(hiddenPrecio);
-
-        const actionsTd = document.createElement("td");
-        const btn = document.createElement("button");
-        btn.type = "button";
-        btn.className = "btn danger small js-remove-line";
-        btn.textContent = "Eliminar";
-        actionsTd.appendChild(btn);
-        tr.appendChild(actionsTd);
-
-        return tr;
-    }
-
-    // Delegación: clicks en botones "Eliminar" (pintados por el servidor
-    // o por buildEmptyRow).
-    linesBody.addEventListener("click", function (evt) {
-        const target = evt.target;
-        if (target && target.classList && target.classList.contains("js-remove-line")) {
-            const tr = target.closest("tr");
-            if (tr) {
-                tr.remove();
-                reindexRows();
-                if (typeof pushUndoAction === "function") pushUndoAction();
-            }
-        }
-    });
-
-    // --------------------------------------------------------------- //
     // Conciliacion editable.
     //
     // El badge Sigrid/Nueva de la fila de conciliacion es un boton que
@@ -935,9 +834,8 @@
             inputs.forEach(function (inp) {
                 inp.addEventListener("input", function () {
                     inp.classList.toggle("cedit-dirty", inp.value !== inp.defaultValue);
-                    saveBtn.hidden = ![].some.call(
-                        inputs, function (i) { return i.value !== i.defaultValue; }
-                    );
+                    // El botón "Guardar" de la fila está SIEMPRE visible; aquí
+                    // solo refrescamos el feedback visual y el importe.
                     refreshImporte();
                 });
                 // Enter guarda directamente.
@@ -982,7 +880,7 @@
                 saveBtn.textContent = "Guardando…";
                 try {
                     const resp = await fetch(
-                        `/api/documents/${documentId}/lines/${vid}/conciliacion`,
+                        `/api/documents/${documentId}/lines/${vid}/conciliacion/campos`,
                         {
                             method: "PATCH",
                             headers: { "Content-Type": "application/json" },
@@ -991,7 +889,17 @@
                     );
                     if (!resp.ok) {
                         let detail = resp.statusText;
-                        try { const b = await resp.json(); detail = b.detail || detail; } catch (_) {}
+                        try {
+                            const b = await resp.json();
+                            if (Array.isArray(b.detail)) {
+                                detail = b.detail.map(function (e) {
+                                    const loc = e.loc ? e.loc.join(".") : "";
+                                    return (loc ? loc + ": " : "") + (e.msg || "");
+                                }).join(" | ");
+                            } else if (b.detail) {
+                                detail = b.detail;
+                            }
+                        } catch (_) {}
                         throw new Error(detail);
                     }
                     window.location.reload();
@@ -1006,13 +914,115 @@
     wireConciliaEdit();
     wirePartidaCombos();
 
+    // ------------------------------------------------------------------ //
+    // "Guardar todas las líneas": guarda de una vez todas las filas salmón
+    // (concilia-editable) que tengan algún cambio, haciendo el mismo PATCH
+    // que el "Guardar" de cada fila. Recarga al terminar.
+    // ------------------------------------------------------------------ //
+    const saveAllLinesBtn = document.getElementById("save-all-lines-btn");
+    if (saveAllLinesBtn) {
+        function _conciliaBody(tr) {
+            const body = {};
+            tr.querySelectorAll(".js-cedit").forEach(function (inp) {
+                const field = inp.dataset.field;
+                if (!field) return;
+                if (inp.dataset.numeric === "1") {
+                    body[field] = parseNumEs(inp.value);
+                } else {
+                    const v = inp.value.trim();
+                    body[field] = v || null;
+                }
+            });
+            return body;
+        }
+        function _rowDirty(tr) {
+            return [].some.call(
+                tr.querySelectorAll(".js-cedit"),
+                function (i) { return i.value !== i.defaultValue; }
+            );
+        }
+        saveAllLinesBtn.addEventListener("click", async function () {
+            const rows = [].slice.call(
+                linesBody.querySelectorAll("tr.concilia-editable")
+            ).filter(_rowDirty);
+            if (!rows.length) {
+                window.alert("No hay líneas de albarán modificadas que guardar.");
+                return;
+            }
+            saveAllLinesBtn.disabled = true;
+            const original = saveAllLinesBtn.textContent;
+            saveAllLinesBtn.textContent = "Guardando…";
+            const errores = [];
+            for (let i = 0; i < rows.length; i++) {
+                const tr = rows[i];
+                const vid = (tr.dataset.forValuationLineId || "").trim();
+                if (!vid) continue;
+                try {
+                    const resp = await fetch(
+                        `/api/documents/${documentId}/lines/${vid}/conciliacion/campos`,
+                        {
+                            method: "PATCH",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify(_conciliaBody(tr)),
+                        }
+                    );
+                    if (!resp.ok) {
+                        let d = resp.statusText;
+                        try {
+                            const b = await resp.json();
+                            if (Array.isArray(b.detail)) {
+                                d = b.detail.map(function (e) {
+                                    const loc = e.loc ? e.loc.join(".") : "";
+                                    return (loc ? loc + ": " : "") + (e.msg || "");
+                                }).join(" | ");
+                            } else if (b.detail) { d = b.detail; }
+                        } catch (_) {}
+                        errores.push("Línea " + vid + ": " + d);
+                    }
+                } catch (_) {
+                    errores.push("Línea " + vid + ": error de red");
+                }
+            }
+            if (errores.length) {
+                window.alert(
+                    "Algunas líneas no se guardaron:\n" + errores.join("\n")
+                );
+                saveAllLinesBtn.disabled = false;
+                saveAllLinesBtn.textContent = original;
+                return;
+            }
+            window.location.reload();
+        });
+    }
+
     if (addLineBtn) {
-        addLineBtn.addEventListener("click", function () {
-            const row = buildEmptyRow(linesBody.querySelectorAll("tr").length);
-            row.dataset.added = "1";
-            linesBody.appendChild(row);
-            reindexRows();
-            pushUndoAction();
+        addLineBtn.addEventListener("click", async function () {
+            // Añade una línea de albarán suelta (no toca las blancas de la IA).
+            // El backend crea una valuation line "Nueva" en blanco; al
+            // recargar aparece como fila salmón editable, con su combo de
+            // descripción (para copiar una línea de contrato → Sigrid) y su
+            // "Borrar ✕".
+            addLineBtn.disabled = true;
+            try {
+                const resp = await fetch(
+                    `/api/documents/${documentId}/lines/standalone`,
+                    { method: "POST", headers: { "Accept": "application/json" } }
+                );
+                if (!resp.ok) {
+                    let msg = "No se pudo añadir la línea de albarán.";
+                    try {
+                        const j = await resp.json();
+                        if (j && j.detail) msg = j.detail;
+                    } catch (_) {}
+                    alert(msg);
+                    addLineBtn.disabled = false;
+                    return;
+                }
+                window.location.reload();
+            } catch (_) {
+                alert("Error de red al añadir la línea de albarán.");
+                addLineBtn.disabled = false;
+            }
         });
     }
 

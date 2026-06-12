@@ -1935,6 +1935,121 @@ class AlbaranReviewRepository:
             return True
 
 
+    def add_standalone_valuation_line(self, *, document_id: str) -> int | None:
+        """Crea una línea salmón SUELTA (sin línea blanca de la IA).
+
+        Inserta una ``albaran_line_valuations`` con ``merge_line_id`` NULL y
+        ``line_kind='manual'``, más una conciliación DERIVADA en blanco
+        (salmón "Nueva"). Así aparece como una fila salmón editable que el
+        usuario puede rellenar a mano, o enganchar a una línea de contrato
+        (→ Sigrid) desde el desplegable de descripción de la propia salmón,
+        igual que el resto de salmón. NO toca ninguna línea blanca.
+
+        Crea la cabecera de valoración si el documento aún no la tiene.
+        Devuelve el ``valuation_line_id`` nuevo, o ``None`` si el documento
+        no existe.
+
+        Nota: como el resto de correcciones manuales, esta línea se PIERDE
+        si luego se pulsa "Valorar ahora" (sv5/sv6 regenera la valoración).
+        """
+        import uuid
+
+        self.initialize()
+        with self._session_factory.create_session() as session:
+            doc = session.execute(
+                text(
+                    "SELECT id FROM albaran_documents_merge WHERE id = :id"
+                ),
+                {"id": document_id},
+            ).first()
+            if doc is None:
+                return None
+
+            now = self._utc_iso()
+
+            hdr = session.execute(
+                text(
+                    "SELECT id, contrato_codigo FROM albaran_valuations "
+                    "WHERE document_id = :doc"
+                ),
+                {"doc": document_id},
+            ).mappings().first()
+            if hdr is None:
+                valuation_id = str(uuid.uuid4())
+                contrato_codigo = None
+                session.execute(
+                    text(
+                        "INSERT INTO albaran_valuations "
+                        "  (id, document_id, status, created_at_utc) "
+                        "VALUES (:id, :doc, 'manual', :now)"
+                    ),
+                    {"id": valuation_id, "doc": document_id, "now": now},
+                )
+            else:
+                valuation_id = hdr["id"]
+                contrato_codigo = hdr["contrato_codigo"]
+
+            # Línea derivada EN BLANCO -> salmón "Nueva" (kind=derived).
+            did_val = session.execute(
+                text(
+                    "INSERT INTO contrato_lines_derived ("
+                    "  created_by_valuation_id, source_document_id, "
+                    "  codigo_contrato, codigo_producto, descripcion_linea, "
+                    "  unidad_medida, precio_unitario, codigo_partida, "
+                    "  origen, created_at_utc) "
+                    "VALUES (:vid, :doc, :cod, NULL, NULL, NULL, NULL, NULL, "
+                    "  'manual_override', :now) "
+                    "RETURNING id"
+                ),
+                {
+                    "vid": valuation_id,
+                    "doc": document_id,
+                    "cod": contrato_codigo or "",
+                    "now": now,
+                },
+            ).scalar_one()
+
+            # Valuation line SUELTA. Mismos literales que el INSERT de
+            # add_conciliacion_for_merge_line (conocido válido) salvo:
+            # merge_line_id NULL, line_kind 'manual' y campos de valor NULL
+            # (línea en blanco que el usuario rellenará).
+            new_id = session.execute(
+                text(
+                    "INSERT INTO albaran_line_valuations ("
+                    "  valuation_id, merge_line_id, matched_contrato_line_id, "
+                    "  derived_contrato_line_id, "
+                    "  precio_unitario_contrato_db, precio_unitario_final, "
+                    "  precio_unitario_source, precio_unitario_agreement, "
+                    "  unidad_albaran, unidad_contrato, unidad_categoria, "
+                    "  unidad_category_match, cantidad_albaran, "
+                    "  cantidad_convertida, factor_conversion, importe_calculado, "
+                    "  importe_source, codigo_partida_albaran, codigo_partida_final, "
+                    "  partida_action, descripcion_linea, line_kind, "
+                    "  match_confidence_pct, match_method, review_required, "
+                    "  created_at_utc) "
+                    "VALUES ("
+                    "  :v, NULL, NULL, :did, NULL, NULL, 'manual_derived', "
+                    "  'manual', NULL, NULL, 'manual', TRUE, NULL, NULL, 1.0, "
+                    "  NULL, 'calculated', NULL, NULL, 'manual', NULL, "
+                    "  'manual', 100.0, 'manual', FALSE, :now) "
+                    "RETURNING id"
+                ),
+                {"v": valuation_id, "did": did_val, "now": now},
+            ).scalar_one()
+
+            # Total de cabecera no cambia (importe NULL no suma), pero
+            # marcamos updated_at por consistencia.
+            session.execute(
+                text(
+                    "UPDATE albaran_valuations SET updated_at_utc = :now "
+                    "WHERE id = :v"
+                ),
+                {"v": valuation_id, "now": now},
+            )
+            session.commit()
+            return int(new_id)
+
+
     def _build_merge_detail(
         self,
         *,
@@ -2969,7 +3084,11 @@ class AlbaranReviewRepository:
             conc.agree_importe = _num(syn.importe_calculado, _exp_imp)
 
         return DisplayLine(
-            line_kind="synthetic_modifier",
+            line_kind=(
+                "manual"
+                if (getattr(syn, "line_kind", "") or "") == "manual"
+                else "synthetic_modifier"
+            ),
             merge_line_id=None,
             valuation_line_id=syn.valuation_line_id,
             line_index=line_index,

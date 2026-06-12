@@ -11,11 +11,11 @@ from typing import Any
 from urllib.parse import quote, urlencode
 
 import httpx
-from fastapi import FastAPI, Form, HTTPException, Query, Request
+from fastapi import Body, FastAPI, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 from application.services.review_service import ReviewService
 from config.settings import Settings
@@ -134,6 +134,57 @@ def _format_fecha_hora_local(value: Any) -> str:
 # que lo hace durante el refetch (a través del endpoint
 # /v1/albaranes/{id}/re-fetch-contratos). El sv4 solo conserva la
 # preview del PDF del albarán propio, no del contrato asociado.
+
+
+class ConciliacionEditBody(BaseModel):
+    """Body del PATCH de edición de la fila salmon (jun 2026).
+
+    Todos los campos opcionales: el front manda los visibles. Los
+    numéricos llegan ya como número (el JS convierte coma decimal), pero
+    por robustez toleramos cadena vacía, "—" o números con coma decimal.
+
+    IMPORTANTE: definido a NIVEL DE MÓDULO (no dentro de build_app). Una
+    clase Pydantic local provoca un ForwardRef que Pydantic 2.12 no puede
+    resolver al usarla como Body(...), dando un 500 al guardar.
+    """
+
+    codigo_partida: str | None = None
+    descripcion: str | None = None
+    cantidad: float | None = None
+    unidad: str | None = None
+    precio_unitario: float | None = None
+    descuento: float | None = None
+    codigo_externo: str | None = None
+
+    @field_validator(
+        "cantidad", "precio_unitario", "descuento", mode="before"
+    )
+    @classmethod
+    def _num_or_none(cls, v: object) -> float | None:
+        if v is None:
+            return None
+        if isinstance(v, (int, float)):
+            return float(v)
+        s = str(v).strip()
+        if not s or s == "\u2014":  # "" o "—"
+            return None
+        if "," in s:
+            s = s.replace(".", "").replace(",", ".")
+        try:
+            return float(s)
+        except ValueError:
+            return None
+
+    @field_validator(
+        "codigo_partida", "descripcion", "unidad", "codigo_externo",
+        mode="before",
+    )
+    @classmethod
+    def _str_or_none(cls, v: object) -> str | None:
+        if v is None:
+            return None
+        s = str(v).strip()
+        return s or None
 
 
 def build_app(settings: Settings) -> FastAPI:
@@ -989,7 +1040,7 @@ def build_app(settings: Settings) -> FastAPI:
     def set_line_conciliacion_api(
         document_id: str,
         valuation_line_id: int,
-        payload: ConciliacionOverridePayload,
+        payload: ConciliacionOverridePayload = Body(...),
     ) -> dict:
         ok = review_service.set_line_conciliacion(
             document_id=document_id,
@@ -1014,28 +1065,18 @@ def build_app(settings: Settings) -> FastAPI:
             "mode": payload.mode,
         }
 
-    class ConciliacionEditBody(BaseModel):
-        """Body del PATCH de edición de la fila salmon (jun 2026).
-
-        Todos los campos opcionales: el front manda los visibles. Los
-        numéricos llegan ya como número (el JS convierte coma decimal).
-        """
-
-        codigo_partida: str | None = None
-        descripcion: str | None = None
-        cantidad: float | None = None
-        unidad: str | None = None
-        precio_unitario: float | None = None
-        descuento: float | None = None
-        codigo_externo: str | None = None
-
+    # IMPORTANTE: path PROPIO (.../conciliacion/campos), distinto del PATCH
+    # de arriba (set_line_conciliacion, que espera 'mode'). Antes ambos
+    # compartían .../conciliacion como PATCH y FastAPI enrutaba los dos al
+    # primero (el de 'mode'), de modo que el "Guardar" de la fila salmón
+    # (sin 'mode') caía en el handler equivocado y daba 422 mode required.
     @app.patch(
-        "/api/documents/{document_id}/lines/{valuation_line_id}/conciliacion"
+        "/api/documents/{document_id}/lines/{valuation_line_id}/conciliacion/campos"
     )
     def update_line_conciliacion_api(
         document_id: str,
         valuation_line_id: int,
-        payload: ConciliacionEditBody,
+        payload: ConciliacionEditBody = Body(...),
     ) -> dict:
         ok = review_service.update_line_conciliacion(
             document_id=document_id,
@@ -1123,6 +1164,26 @@ def build_app(settings: Settings) -> FastAPI:
             "document_id": document_id,
             "merge_line_id": merge_line_id,
             "matched_contrato_line_id": payload.matched_contrato_line_id,
+        }
+
+    @app.post("/api/documents/{document_id}/lines/standalone")
+    def add_standalone_line_api(document_id: str) -> dict:
+        # Crea una linea salmon SUELTA (sin linea blanca): una valuation
+        # line nueva con conciliacion "Nueva" en blanco. El usuario la
+        # rellena o la engancha a una linea de contrato desde el combo de
+        # descripcion de la salmon. NO toca ninguna linea blanca.
+        new_id = review_service.add_standalone_valuation_line(
+            document_id=document_id,
+        )
+        if new_id is None:
+            raise HTTPException(
+                status_code=400,
+                detail="No se pudo crear la linea salmon (documento no valido).",
+            )
+        return {
+            "ok": True,
+            "document_id": document_id,
+            "valuation_line_id": new_id,
         }
 
     @app.exception_handler(KeyError)

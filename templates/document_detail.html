@@ -396,10 +396,6 @@
                         <span>Notas de revisión</span>
                         <textarea id="review_notes" rows="3">{{ document.review_notes or '' }}</textarea>
                     </label>
-                    <label>
-                        <span>Revisor</span>
-                        <input type="text" id="approved_by" value="{{ document.approved_by or '' }}" placeholder="Nombre del revisor">
-                    </label>
                 </div>
 
                 <div class="subsection-header">
@@ -420,7 +416,8 @@
                             Borrar casadas
                         </button>
                     {% endif %}
-                    <button type="button" class="btn secondary small" id="add-line-btn">Añadir línea</button>
+                    <button type="button" class="btn secondary small" id="add-line-btn" title="Añade una línea de albarán nueva (a llevar a Sigrid). No toca las líneas blancas leídas por la IA. Puedes dejarla en blanco o copiar una línea de contrato desde su desplegable de descripción.">Añadir línea albarán</button>
+                    <button type="button" class="btn success small" id="save-all-lines-btn" title="Guarda de una vez todas las líneas de albarán (salmón) que hayas modificado.">Guardar todas las líneas</button>
                 </div>
 
                 {#
@@ -467,6 +464,11 @@
                              albaran_line_valuations por valuation_line_id).
                            El JS las distingue por data-line-kind. #}
                         {% for dline in document.display_lines %}
+                            {# La línea salmón SUELTA (manual) no tiene blanca:
+                               se pinta SOLO como fila salmón (la conciliación de
+                               abajo). El resto de líneas pintan su fila principal
+                               normal. #}
+                            {% if dline.line_kind != 'manual' %}
                             <tr data-line-kind="{{ dline.line_kind }}"
                                 data-line-id="{{ dline.merge_line_id if dline.merge_line_id is not none else '' }}"
                                 data-valuation-line-id="{{ dline.valuation_line_id if dline.valuation_line_id is not none else '' }}">
@@ -563,10 +565,10 @@
                                         <input type="hidden"
                                                data-field="precio"
                                                value="{{ merge_line_payload.precio if merge_line_payload and merge_line_payload.precio is not none else '' }}">
-                                        <button type="button" class="btn danger small js-remove-line">Eliminar</button>
                                     {% endif %}
                                 </td>
                             </tr>
+                            {% endif %}
                             {# Fila de conciliación inline, ALINEADA POR
                                COLUMNAS con la línea de arriba (el precio de
                                Sigrid cae bajo "Precio unitario", etc.) para
@@ -716,7 +718,7 @@
                                     {# Col acciones — botón Guardar (aparece al editar) #}
                                     <td class="concilia-td">
                                         {% if cedit %}
-                                            <button type="button" class="btn small success js-cedit-save" hidden
+                                            <button type="button" class="btn small success js-cedit-save"
                                                     title="Guardar los cambios de esta línea. Si has cambiado imputación, unidad o precio, la línea pasará de Sigrid a Nueva conservando el resto de campos.">Guardar</button>
                                         {% endif %}
                                     </td>

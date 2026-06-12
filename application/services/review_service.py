@@ -149,6 +149,15 @@ class ReviewService:
             descripcion=descripcion,
         )
 
+    def add_standalone_valuation_line(
+        self,
+        *,
+        document_id: str,
+    ) -> int | None:
+        return self._repository.add_standalone_valuation_line(
+            document_id=document_id,
+        )
+
     def unapprove_document(self, *, document_id: str) -> None:
         self._repository.set_approved(
             document_id=document_id,
