@@ -818,25 +818,44 @@
             const saveBtn = tr.querySelector(".js-cedit-save");
             if (!inputs.length || !saveBtn) return;
 
-            function refreshImporte() {
+            // Sincroniza importe <-> precio unitario, igual que la fila
+            // blanca del PDF, pero metiendo el descuento (%) en la ecuación:
+            //   importe = cantidad × precio × (1 − dto/100)
+            //   precio  = importe / (cantidad × (1 − dto/100))
+            // 'campo' es el data-field que el usuario acaba de tocar.
+            function syncImporteUnitario(campo) {
                 const cantEl = tr.querySelector('[data-field="cantidad"]');
                 const puEl = tr.querySelector('[data-field="precio_unitario"]');
-                const impEl = tr.querySelector(".js-cimporte");
-                if (!impEl) return;
+                const dtoEl = tr.querySelector('[data-field="descuento"]');
+                const impEl = tr.querySelector('[data-field="importe"]');
                 const cant = cantEl ? parseNumEs(cantEl.value) : null;
-                const pu = puEl ? parseNumEs(puEl.value) : null;
-                if (cant === null || pu === null) { impEl.textContent = "—"; return; }
-                impEl.textContent = (cant * pu).toLocaleString("es-ES", {
-                    style: "currency", currency: "EUR",
-                });
+                const dto = dtoEl ? parseNumEs(dtoEl.value) : null;
+                const factor = 1 - (dto || 0) / 100;
+                if (campo === "importe") {
+                    // Cambió el importe -> ajustamos el precio unitario.
+                    if (!puEl || !impEl) return;
+                    const imp = parseNumEs(impEl.value);
+                    if (cant !== null && cant !== 0 && factor !== 0 && imp !== null) {
+                        puEl.value = String(Math.round((imp / (cant * factor)) * 10000) / 10000);
+                    }
+                } else {
+                    // Cambió cantidad / precio / descuento -> recomputamos importe.
+                    if (!impEl) return;
+                    const pu = puEl ? parseNumEs(puEl.value) : null;
+                    if (cant !== null && pu !== null) {
+                        impEl.value = String(Math.round(cant * pu * factor * 100) / 100);
+                    } else {
+                        impEl.value = "";
+                    }
+                }
             }
 
             inputs.forEach(function (inp) {
                 inp.addEventListener("input", function () {
                     inp.classList.toggle("cedit-dirty", inp.value !== inp.defaultValue);
                     // El botón "Guardar" de la fila está SIEMPRE visible; aquí
-                    // solo refrescamos el feedback visual y el importe.
-                    refreshImporte();
+                    // sincronizamos importe<->unitario y el feedback visual.
+                    syncImporteUnitario(inp.dataset.field);
                 });
                 // Enter guarda directamente.
                 inp.addEventListener("keydown", function (e) {
@@ -915,9 +934,10 @@
     wirePartidaCombos();
 
     // ------------------------------------------------------------------ //
-    // "Guardar todas las líneas": guarda de una vez todas las filas salmón
-    // (concilia-editable) que tengan algún cambio, haciendo el mismo PATCH
-    // que el "Guardar" de cada fila. Recarga al terminar.
+    // "Guardar todas las líneas": guarda de una vez TODAS las filas salmón
+    // (concilia-editable), hayas tocado o no cada campo, con el mismo PATCH
+    // que el "Guardar" de cada fila. (Re-guardar una línea sin cambios es
+    // inocuo: el backend reaplica los mismos valores.) Recarga al terminar.
     // ------------------------------------------------------------------ //
     const saveAllLinesBtn = document.getElementById("save-all-lines-btn");
     if (saveAllLinesBtn) {
@@ -935,18 +955,12 @@
             });
             return body;
         }
-        function _rowDirty(tr) {
-            return [].some.call(
-                tr.querySelectorAll(".js-cedit"),
-                function (i) { return i.value !== i.defaultValue; }
-            );
-        }
         saveAllLinesBtn.addEventListener("click", async function () {
             const rows = [].slice.call(
                 linesBody.querySelectorAll("tr.concilia-editable")
-            ).filter(_rowDirty);
+            );
             if (!rows.length) {
-                window.alert("No hay líneas de albarán modificadas que guardar.");
+                window.alert("No hay líneas de albarán que guardar.");
                 return;
             }
             saveAllLinesBtn.disabled = true;

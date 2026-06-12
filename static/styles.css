@@ -480,6 +480,9 @@ input[readonly].readonly-cell {
 .viewer-panel { position: sticky; top: 88px; }
 
 .panel-header, .subsection-header { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 16px; }
+/* Separa el bloque de Líneas (y demás subsecciones) de la parte inferior del
+   bloque de revisión que tiene encima, y le da aire por arriba. */
+.subsection-header { margin-top: 40px; padding-top: 28px; border-top: 1px solid var(--line); }
 
 .document-frame {
     width: 100%;

@@ -449,7 +449,7 @@
                             <th>Unidad</th>
                             <th>Precio unitario</th>
                             <th>Importe</th>
-                            <th>Descuento</th>
+                            <th>Descuento (%)</th>
                             <th>Código</th>
                             <th></th>
                         </tr>
@@ -686,19 +686,31 @@
                                         {% endif %}
                                         <span class="concilia-sub">precio contrato</span>
                                     </td>
-                                    {# Col Importe — calculado: cantidad (de arriba) * precio
-                                       unitario del contrato. NO se escribe en la línea blanca. #}
+                                    {# Col Importe — EDITABLE en filas salmón: si lo
+                                       cambias, se ajusta el precio unitario y
+                                       viceversa (igual que la línea blanca del PDF).
+                                       importe = cantidad × precio × (1 − dto%). #}
                                     <td class="concilia-td">
                                         {% if dline.cantidad is not none and c.unitario is not none %}
-                                            {% if c.agree_importe == true %}
-                                                <span class="concilia-price-ok"><span class="concilia-icon" aria-hidden="true">✓</span> {{ (dline.cantidad * c.unitario) | importe_eur }}</span>
+                                            {% set _imp = dline.cantidad * c.unitario * (1 - (c.descuento or 0) / 100) %}
+                                            {% if cedit %}
+                                                <input type="text" inputmode="decimal" class="cell-input cell-num js-cedit" data-field="importe" data-numeric="1"
+                                                       value="{{ '%.2f'|format(_imp) }}" placeholder="—">
+                                                <span class="concilia-sub">cant × precio − dto%</span>
+                                            {% elif c.agree_importe == true %}
+                                                <span class="concilia-price-ok"><span class="concilia-icon" aria-hidden="true">✓</span> {{ _imp | importe_eur }}</span>
+                                                <span class="concilia-sub">cant × precio − dto%</span>
                                             {% elif c.agree_importe == false %}
-                                                <span class="concilia-price-warn"><span class="concilia-icon" aria-hidden="true">⚠</span> {{ (dline.cantidad * c.unitario) | importe_eur }}</span>
+                                                <span class="concilia-price-warn"><span class="concilia-icon" aria-hidden="true">⚠</span> {{ _imp | importe_eur }}</span>
+                                                <span class="concilia-sub">cant × precio − dto%</span>
                                             {% else %}
-                                                <span class="concilia-val js-cimporte">{{ (dline.cantidad * c.unitario) | importe_eur }}</span>
+                                                <span class="concilia-val">{{ _imp | importe_eur }}</span>
+                                                <span class="concilia-sub">cant × precio − dto%</span>
                                             {% endif %}
-                                            <span class="concilia-sub">cant × precio contrato</span>
-                                        {% else %}<span class="concilia-val js-cimporte">—</span>{% endif %}
+                                        {% elif cedit %}
+                                            <input type="text" inputmode="decimal" class="cell-input cell-num js-cedit" data-field="importe" data-numeric="1"
+                                                   value="" placeholder="—">
+                                        {% else %}<span class="concilia-val">—</span>{% endif %}
                                     </td>
                                     {# Col Descuento — campo NUEVO (jun 2026): no existe en
                                        Sigrid; viajará con la línea al insertar el albarán. #}
@@ -773,7 +785,7 @@
                         <th>Unidad</th>
                         <th>Precio unitario</th>
                         <th>Importe</th>
-                        <th>Descuento</th>
+                        <th>Descuento (%)</th>
                         <th>Código</th>
                         <th>Confianza</th>
                     </tr>

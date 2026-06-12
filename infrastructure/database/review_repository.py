@@ -1533,11 +1533,14 @@ class AlbaranReviewRepository:
                 or not _num_eq(new_precio, cur_precio)
             )
 
-            importe = (
-                round(float(new_precio) * float(new_cantidad), 2)
-                if new_precio is not None and new_cantidad is not None
-                else None
-            )
+            if new_precio is not None and new_cantidad is not None:
+                base = float(new_precio) * float(new_cantidad)
+                # 'descuento' es un PORCENTAJE (p.ej. 3 = 3%): descuenta del
+                # importe de la línea (importe = base × (1 − dto/100)).
+                dto_pct = float(descuento) if descuento is not None else 0.0
+                importe = round(base * (1.0 - dto_pct / 100.0), 2)
+            else:
+                importe = None
 
             extra_sets = ""
             params: dict[str, Any] = {
