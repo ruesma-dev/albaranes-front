@@ -414,6 +414,8 @@ input[readonly].readonly-cell {
 /* Hover de fila SOLO en la bandeja (la tabla de líneas tiene inputs y
    filas de conciliación con fondo propio). Color sólido para que la
    columna sticky no desentone al solaparse. */
+.docs-table th, .docs-table td { border-right: 1px solid var(--line); }
+.docs-table th:last-child, .docs-table td:last-child { border-right: none; }
 .docs-table tbody tr:hover td { background: #f8f4f5; }
 
 /* Lista de documentos: la columna "Acciones" queda fija a la izquierda
@@ -1289,11 +1291,14 @@ button.concilia-badge.js-concilia-edit:hover {
    los valores de valoración aplicados. Columnas internas de ANCHO FIJO para
    que partida / cantidad-ud / importe queden alineadas en vertical entre
    líneas; la descripción ocupa el resto (ancha). */
-.lineas-cell, .lineas-col { min-width: 440px; }
+.lineas-cell, .lineas-col { min-width: 460px; }
 .linea-rev {
     display: grid;
-    grid-template-columns: 58px minmax(0, 1fr) 132px;  /* partida | descripción | cant·importe */
-    column-gap: 10px;
+    /* partida | descripción | cantidad | unidad | importe — TODAS de
+       ancho fijo, con la misma separación entre ellas (column-gap), para
+       que queden alineadas en vertical entre líneas y sin huecos grandes. */
+    grid-template-columns: 56px 200px 40px 36px 84px;
+    column-gap: 8px;
     align-items: baseline;
     padding: 1px 0 1px 7px;
     border-left: 2px solid #e3a98f;          /* salmón */
@@ -1313,16 +1318,40 @@ button.concilia-badge.js-concilia-edit:hover {
     white-space: nowrap;
     color: var(--ink-soft);
 }
-.linea-rev .lr-num {
-    color: var(--ink);
-    white-space: nowrap;
+.linea-rev .lr-cant {
     text-align: right;
+    white-space: nowrap;
+    color: var(--ink);
+    font-variant-numeric: tabular-nums;
+}
+.linea-rev .lr-ud {
+    text-align: left;
+    white-space: nowrap;
+    color: var(--steel);
+}
+.linea-rev .lr-imp {
+    text-align: right;
+    white-space: nowrap;
+    color: var(--ink);
     font-variant-numeric: tabular-nums;
 }
 .lineas-empty { color: var(--steel-300); font-size: 0.72rem; }
 
 /* ---- Fila de filtros por columna (jun 2026) ---- */
-.docs-table thead tr:first-child th { border-bottom-color: var(--line); }
+/* Cabecera de títulos (primera fila) en rojo Ruesma con texto blanco.
+   La fila de filtros (segunda) se queda en blanco para los campos. */
+.docs-table thead tr:first-child th {
+    background: var(--brand);
+    color: #fff;
+    border-bottom-color: var(--brand-strong);
+    border-right-color: rgba(255, 255, 255, 0.22);
+}
+.docs-table thead tr:first-child th:last-child { border-right: none; }
+.docs-table thead tr:first-child th a { color: #fff; }
+.docs-table thead tr:first-child th a:hover { color: rgba(255, 255, 255, 0.78); }
+/* La columna fija de la cabecera roja también debe ir en rojo (vence al
+   fondo blanco del sticky). */
+.docs-table thead tr:first-child th.sticky-col { background: var(--brand); }
 .filter-row th {
     padding: 6px 10px 10px;
     border-bottom: 1px solid var(--line-strong);

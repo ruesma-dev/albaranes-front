@@ -210,7 +210,9 @@
                                 <div class="linea-rev{% if ln.kind == 'synthetic_modifier' %} is-mod{% endif %}">
                                     <span class="lr-part">{{ ln.codigo_partida or '—' }}</span>
                                     <span class="lr-desc">{{ ln.concepto or '—' }}</span>
-                                    <span class="lr-num">{% if ln.cantidad is not none %}{{ '%g'|format(ln.cantidad) }}{% if ln.unidad %} {{ ln.unidad }}{% endif %} · {% endif %}{{ ln.importe | importe_eur }}</span>
+                                    <span class="lr-cant">{% if ln.cantidad is not none %}{{ '%g'|format(ln.cantidad) }}{% endif %}</span>
+                                    <span class="lr-ud">{{ ln.unidad or '' }}</span>
+                                    <span class="lr-imp">{{ ln.importe | importe_eur }}</span>
                                 </div>
                             {% endfor %}
                         {% else %}
