@@ -33,6 +33,11 @@ class ReviewService:
             view_mode=view_mode,
         )
 
+    def get_contrato_pdf_url(self, document_id: str) -> str | None:
+        """URL del PDF del contrato en SharePoint para abrir desde el front.
+        Resuelta por consulta directa en el repositorio (robusta)."""
+        return self._repository.get_contrato_pdf_url(document_id)
+
     def save_document(
         self,
         *,

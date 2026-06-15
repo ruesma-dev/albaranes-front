@@ -3,7 +3,9 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from urllib.parse import quote
+
+from pydantic import BaseModel, Field, computed_field, field_validator
 
 VIEW_MODE_MERGE = "merge"
 KNOWN_PROVIDER_VIEWS = ("openai", "gemini", "claude")
@@ -542,6 +544,59 @@ class DocumentDetailPayload(BaseModel):
     selected_contrato_codigo: str | None = None
     # NUEVO — None mientras no exista valoración en BBDD.
     valuation: ValuationPayload | None = None
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def contrato_pdf_url(self) -> str | None:
+        """URL para abrir el PDF del contrato en SharePoint.
+
+        Robusto: prioriza el contrato seleccionado; usa su
+        ``pdf_sharepoint_web_url`` y, si no lo tuviera, construye la URL
+        desde ``pdf_sharepoint_relative_path`` reutilizando la base del
+        enlace del albarán (``document_url``), que comparte el mismo
+        document library. Devuelve None solo si NINGÚN contrato tiene ni
+        web_url ni relative_path (entonces el path no se guardó en sv3).
+        """
+        contratos = self.contratos or []
+        if not contratos:
+            return None
+        elegido = None
+        if self.selected_contrato_codigo:
+            for c in contratos:
+                if c.codigo_contrato == self.selected_contrato_codigo:
+                    elegido = c
+                    break
+        if elegido is None:
+            for c in contratos:
+                if c.pdf_sharepoint_web_url or c.pdf_sharepoint_relative_path:
+                    elegido = c
+                    break
+        if elegido is None:
+            elegido = contratos[0]
+
+        if elegido.pdf_sharepoint_web_url:
+            return elegido.pdf_sharepoint_web_url
+        rel = elegido.pdf_sharepoint_relative_path
+        if rel and self.document_url and "/albaranes/" in self.document_url:
+            base = self.document_url.split("/albaranes/", 1)[0]
+            return base + "/" + quote(rel, safe="/")
+        return None
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def contrato_pdf_codigo(self) -> str | None:
+        """Código del contrato cuyo PDF abre ``contrato_pdf_url``."""
+        contratos = self.contratos or []
+        if not contratos:
+            return None
+        if self.selected_contrato_codigo:
+            for c in contratos:
+                if c.codigo_contrato == self.selected_contrato_codigo:
+                    return c.codigo_contrato
+        for c in contratos:
+            if c.pdf_sharepoint_web_url or c.pdf_sharepoint_relative_path:
+                return c.codigo_contrato
+        return contratos[0].codigo_contrato
 
 
 class PaginatedDocuments(BaseModel):

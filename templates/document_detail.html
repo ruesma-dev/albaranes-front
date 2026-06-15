@@ -11,20 +11,7 @@
     salir. Por eso usamos un ``namespace``: las asignaciones a sus
     atributos sí persisten fuera del bucle.
 #}
-{% set _pdf = namespace(url=None, codigo=None) %}
-{% if document.contratos|length == 1 and document.contratos[0].pdf_sharepoint_web_url %}
-    {% set _pdf.url = document.contratos[0].pdf_sharepoint_web_url %}
-    {% set _pdf.codigo = document.contratos[0].codigo_contrato %}
-{% elif document.selected_contrato_codigo %}
-    {% for c in document.contratos %}
-        {% if c.codigo_contrato == document.selected_contrato_codigo and c.pdf_sharepoint_web_url %}
-            {% set _pdf.url = c.pdf_sharepoint_web_url %}
-            {% set _pdf.codigo = c.codigo_contrato %}
-        {% endif %}
-    {% endfor %}
-{% endif %}
-{% set contrato_pdf_url = _pdf.url %}
-{% set contrato_pdf_codigo = _pdf.codigo %}
+{# El boton del contrato apunta a /documents/<id>/contrato-pdf, que resuelve la URL en el servidor y redirige. #}
 
 {#
     Helper para buscar la valoración de una línea (por merge_line_id).
@@ -69,12 +56,12 @@
                 Abrir albarán en SharePoint
             </a>
         {% endif %}
-        {% if contrato_pdf_url %}
-            <a href="{{ contrato_pdf_url }}"
+        {% if document.contratos or document.selected_contrato_codigo %}
+            <a href="/documents/{{ document.id }}/contrato-pdf"
                target="_blank"
                rel="noreferrer"
                class="btn secondary"
-               title="Abrir el PDF del contrato {{ contrato_pdf_codigo }}">
+               title="Abrir el PDF del contrato en SharePoint">
                 Abrir contrato en SharePoint
             </a>
         {% endif %}

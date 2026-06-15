@@ -703,6 +703,19 @@ def build_app(settings: Settings) -> FastAPI:
             context=context,
         )
 
+    @app.get("/documents/{document_id}/contrato-pdf")
+    def document_contrato_pdf(document_id: str) -> Response:
+        """Abre el PDF del contrato en SharePoint. Resuelve la URL por
+        consulta directa a BBDD y redirige (302). Asi el boton del front
+        funciona aunque el web_url no llegue al payload del detalle."""
+        url = review_service.get_contrato_pdf_url(document_id)
+        if not url:
+            raise HTTPException(
+                status_code=404,
+                detail="Este albaran no tiene PDF de contrato en SharePoint.",
+            )
+        return RedirectResponse(url, status_code=302)
+
     @app.get("/documents/{document_id}/preview", response_class=Response)
     def document_preview(document_id: str) -> Response:
         document = review_service.get_document(document_id)

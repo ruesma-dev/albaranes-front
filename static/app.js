@@ -1812,14 +1812,19 @@
         }
         function syncHeaderBtn(codigo) {
             if (!headerBtn) return;
+            // El boton SIEMPRE visible. Si el mapa cliente tiene la URL
+            // directa del PDF, la usamos; si no, dejamos el href del
+            // template (/documents/<id>/contrato-pdf), que resuelve el PDF
+            // en el servidor. Antes se ocultaba el boton cuando el mapa no
+            // tenia la URL: ese era el motivo de que no apareciera.
             const url = codigo ? contratosPdfMap[codigo] : null;
             if (url) {
                 headerBtn.href = url;
-                headerBtn.title = "Abrir el PDF del contrato " + codigo;
-                headerBtn.style.display = "";
-            } else {
-                headerBtn.style.display = "none";
             }
+            if (codigo) {
+                headerBtn.title = "Abrir el PDF del contrato " + codigo;
+            }
+            headerBtn.style.display = "";
         }
         function showCard(codigo) {
             cards.forEach(function (card) {

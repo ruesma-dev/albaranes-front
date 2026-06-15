@@ -1,6 +1,8 @@
 # infrastructure/database/review_repository.py
 from __future__ import annotations
 
+from urllib.parse import quote
+
 import math
 from datetime import datetime, timezone
 from typing import Any
@@ -539,13 +541,15 @@ class AlbaranReviewRepository:
             _contratos_all = [
                 self._contrato_orm_to_payload(item) for item in contratos_orm
             ]
-            _seen_cod: set[str] = set()
-            contratos_payload = []
+            # Dedup por codigo PREFIRIENDO la fila que tenga el PDF.
+            _by_cod: dict[str, ContratoPayload] = {}
             for _cp in _contratos_all:
-                if _cp.codigo_contrato in _seen_cod:
-                    continue
-                _seen_cod.add(_cp.codigo_contrato)
-                contratos_payload.append(_cp)
+                _prev = _by_cod.get(_cp.codigo_contrato)
+                if _prev is None:
+                    _by_cod[_cp.codigo_contrato] = _cp
+                elif (not _prev.pdf_sharepoint_web_url) and _cp.pdf_sharepoint_web_url:
+                    _by_cod[_cp.codigo_contrato] = _cp
+            contratos_payload = list(_by_cod.values())
 
             # Lineas del contrato seleccionado, para el desplegable de
             # conciliacion editable del front (elegir otra linea o nueva).
@@ -3112,6 +3116,69 @@ class AlbaranReviewRepository:
             parent_merge_line_id=syn.parent_merge_line_id,
             concilia=conc,
         )
+
+    def get_contrato_pdf_url(self, document_id: str) -> str | None:
+        """Resuelve la URL del PDF del contrato para un documento, por
+        consulta DIRECTA a ``albaran_contratos_merge`` (sin pasar por el
+        payload ni la deduplicacion del detalle).
+
+        Estrategia robusta frente al hecho de que la fila de contrato es
+        unica por ``sigrid_ide`` y su ``document_id`` apunta al ULTIMO
+        albaran que la enriquecio:
+          1) filas cuyo ``document_id`` es el de este albaran;
+          2) si no hay, filas del ``selected_contrato_codigo`` del albaran;
+          3) de las candidatas, la primera con ``pdf_sharepoint_web_url``;
+             si ninguna lo tiene, se construye desde
+             ``pdf_sharepoint_relative_path`` reusando la base del enlace
+             del albaran (``document_url``).
+        Devuelve ``None`` si no hay ni web_url ni relative_path.
+        """
+        self.initialize()
+        if not self._tables_ready():
+            return None
+        with self._session_factory.create_session() as session:
+            merge_doc = session.get(AlbaranDocumentMergeOrm, document_id)
+            if merge_doc is None:
+                return None
+            albaran_url = getattr(merge_doc, "document_url", None)
+            selected = getattr(merge_doc, "selected_contrato_codigo", None)
+
+            filas = session.scalars(
+                select(AlbaranContratoMergeOrm)
+                .where(AlbaranContratoMergeOrm.document_id == document_id)
+            ).all()
+            if not filas and selected:
+                filas = session.scalars(
+                    select(AlbaranContratoMergeOrm)
+                    .where(AlbaranContratoMergeOrm.codigo_contrato == selected)
+                ).all()
+            if not filas:
+                return None
+
+            # Preferimos la fila del contrato seleccionado.
+            elegido = None
+            if selected:
+                for f in filas:
+                    if f.codigo_contrato == selected and (
+                        f.pdf_sharepoint_web_url or f.pdf_sharepoint_relative_path
+                    ):
+                        elegido = f
+                        break
+            if elegido is None:
+                for f in filas:
+                    if f.pdf_sharepoint_web_url or f.pdf_sharepoint_relative_path:
+                        elegido = f
+                        break
+            if elegido is None:
+                return None
+
+            if elegido.pdf_sharepoint_web_url:
+                return elegido.pdf_sharepoint_web_url
+            rel = elegido.pdf_sharepoint_relative_path
+            if rel and albaran_url and "/albaranes/" in albaran_url:
+                base = albaran_url.split("/albaranes/", 1)[0]
+                return base + "/" + quote(rel, safe="/")
+            return None
 
     @staticmethod
     def _contrato_orm_to_payload(item: AlbaranContratoMergeOrm) -> ContratoPayload:
