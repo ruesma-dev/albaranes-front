@@ -34,10 +34,13 @@ from domain.ports.contrato_refetch_port import ContratoRefetchClient
 from domain.ports.orchestrator_port import OrchestratorClient
 from infrastructure.database.review_repository import AlbaranReviewRepository
 from infrastructure.database.session_factory import SessionFactory
+from infrastructure.database.workflow_runs_purger import WorkflowRunsPurger
 from infrastructure.graph.token_provider import GraphTokenProvider
-from infrastructure.http.orchestrator_client import HttpOrchestratorClient
-from infrastructure.http.sv3_refetch_client import Sv3RefetchClient
+from infrastructure.colas.colas_orchestrator_client import ColasOrchestratorClient
+from infrastructure.colas.colas_refetch_client import ColasRefetchClient
 from infrastructure.sigrid.sigrid_lookup_client import SigridLookupClient
+from ruesma_comun.colas import construir_publicador
+from ruesma_comun.colas.publicador import PublicadorBestEffort
 
 logger = logging.getLogger(__name__)
 
@@ -212,63 +215,45 @@ def build_app(settings: Settings) -> FastAPI:
     )
 
     # ------------------------------------------------------------------ #
-    # Wiring del cliente HTTP al sv3 para el re-fetch manual de
-    # contratos desde el portal.
+    # Publicador de COLAS (sustituye a los clientes HTTP a sv7 y sv3).
     #
-    # Antes el sv4 mantenía su propio cliente Sigrid + ContratoRefetchService
-    # + SharePointContratoPdfStorage, duplicando código del sv3 y
-    # pisando los sigrid_ide del UPSERT. Tras el refactor (mayo 2026)
-    # el sv4 delega ÍNTEGRAMENTE en el sv3: hace POST al endpoint
-    # /v1/albaranes/{id}/re-fetch-contratos y reenvía el outcome al
-    # front.
-    #
-    # El cliente HTTP se construye SIEMPRE (no depende de credenciales
-    # — el sv4 no tiene que conocerlas). Si el sv3 está caído o no
-    # tiene Sigrid cableado, el cliente devuelve outcomes con
-    # status=sigrid_error y mensajes útiles; el portal no se rompe.
+    # ``construir_publicador`` lee del ENTORNO:
+    #   - COLAS_ACCOUNT_URL        (managed identity en Azure), o
+    #   - COLAS_CONNECTION_STRING  (local/Azurite).
+    # Se envuelve en PublicadorBestEffort: el dato fundamental
+    # (selected_contrato_codigo, approved=true, hard-delete) YA está en
+    # BBDD antes de publicar; el mensaje es solo el disparador y su
+    # pérdida es recuperable a mano. Si no publica, el endpoint informa
+    # al revisor con honestidad (no dice "encolada" si no lo está).
     # ------------------------------------------------------------------ #
-    sv3_refetch_client: ContratoRefetchClient = Sv3RefetchClient(
-        base_url=settings.sv3_base_url,
-        path=settings.sv3_path_refetch_contratos,
-        timeout_s=settings.sv3_timeout_s,
+    publicador = PublicadorBestEffort(
+        construir_publicador(emitido_por="ca-sv4-front")
     )
-    logger.info(
-        "[contrato-refetch][wiring] Sv3RefetchClient CABLEADO base_url=%s "
-        "path=%s timeout=%ss",
-        settings.sv3_base_url,
-        settings.sv3_path_refetch_contratos,
-        settings.sv3_timeout_s,
+
+    # Re-fetch de contratos (antes Sv3RefetchClient → sv3 HTTP síncrono).
+    # Ahora re-publica q-persistencia con force=True (sv3 re-ejecuta su
+    # enrichment con force_refetch=True). ASÍNCRONO: el outcome lleva
+    # status="queued" y el front debe avisar "refresca en unos segundos".
+    sv3_refetch_client: ContratoRefetchClient = ColasRefetchClient(
+        publicador=publicador,
     )
     app.state.sv3_refetch_client = sv3_refetch_client
 
-    # ------------------------------------------------------------------ #
-    # Cliente al orquestador (sv7).
-    #
-    # Antes existía como archivo (infrastructure/http/orchestrator_client.py)
-    # pero NUNCA se instanciaba ni se llamaba — el sv4 jamás notificaba
-    # eventos al sv7 y por tanto la valoración nunca arrancaba desde el
-    # portal. Aquí lo activamos.
-    #
-    # Best-effort: el cliente captura cualquier fallo HTTP/red y lo
-    # loguea sin propagar. La razón es que el dato fundamental
-    # (selected_contrato_codigo, approved=true) YA está persistido en
-    # albaran_documents_merge antes de llamar al sv7. El evento es solo
-    # el "trigger" para que sv7 actúe; si se pierde, no se pierde estado.
-    # ------------------------------------------------------------------ #
-    orchestrator_client: OrchestratorClient = HttpOrchestratorClient(
-        base_url=settings.sv7_base_url,
-        path_contract_selected=settings.sv7_path_contract_selected,
-        path_document_approved=settings.sv7_path_document_approved,
-        path_document_purged=settings.sv7_path_document_purged,
-        timeout_s=settings.sv7_timeout_s,
-    )
-    logger.info(
-        "[orchestrator][wiring] HttpOrchestratorClient CABLEADO base_url=%s "
-        "timeout=%ss",
-        settings.sv7_base_url,
-        settings.sv7_timeout_s,
+    # Orquestador (antes HttpOrchestratorClient → sv7, disuelto). Ahora:
+    #   - contract-selected → MensajeValoracion(force=True) → q-valoracion
+    #   - document-approved → MensajeFeedback → q-feedback
+    #   - document-purged   → limpieza directa de workflow_runs (BBDD),
+    #     que desbloquea el dedup por contenido tras el hard-delete.
+    workflow_runs_purger = WorkflowRunsPurger(session_factory)
+    orchestrator_client: OrchestratorClient = ColasOrchestratorClient(
+        publicador=publicador,
+        workflow_runs_purger=workflow_runs_purger,
     )
     app.state.orchestrator_client = orchestrator_client
+    logger.info(
+        "[colas][wiring] publicador best-effort + adapters de cola "
+        "CABLEADOS (emitido_por=ca-sv4-front)"
+    )
 
     # ------------------------------------------------------------------ #
     # Cliente de SOLO LECTURA a Sigrid para los desplegables de cabecera
@@ -326,6 +311,21 @@ def build_app(settings: Settings) -> FastAPI:
         name="static",
     )
 
+    # ------------------------------------------------------------------ #
+    # Identidad del revisor desde Easy Auth (Entra ID).
+    #
+    # Container Apps con Easy Auth inyecta el UPN del usuario autenticado
+    # en la cabecera ``X-MS-CLIENT-PRINCIPAL-NAME`` en cada petición. La
+    # usamos para atribuir quién aprueba/purga/valora/elimina. Fallback a
+    # ``default_reviewer`` en local (sin Easy Auth) o si la cabecera no
+    # llega.
+    # ------------------------------------------------------------------ #
+    def _reviewer_from_request(request: Request) -> str | None:
+        principal = request.headers.get("X-MS-CLIENT-PRINCIPAL-NAME")
+        if principal and principal.strip():
+            return principal.strip()
+        return settings.default_reviewer
+
     @app.get("/health", response_model=HealthResponse)
     def health() -> HealthResponse:
         ready = review_service.initialize()
@@ -340,7 +340,7 @@ def build_app(settings: Settings) -> FastAPI:
                 "default_page_size": settings.default_page_size,
                 "max_page_size": settings.max_page_size,
                 "preview_enabled": settings.preview_enabled,
-                "sv3_refetch_client_url": settings.sv3_base_url,
+                "refetch_mode": "async-via-q-persistencia",
             },
         )
 
@@ -554,12 +554,13 @@ def build_app(settings: Settings) -> FastAPI:
     @app.post("/documents/{document_id}/approve", include_in_schema=False)
     def approve_from_list(
         document_id: str,
+        request: Request,
         redirect_query: str = Form(default=""),
         approved_by: str = Form(default=""),
     ) -> RedirectResponse:
         review_service.approve_document(
             document_id=document_id,
-            approved_by=approved_by.strip() or settings.default_reviewer,
+            approved_by=approved_by.strip() or _reviewer_from_request(request),
         )
         query = redirect_query.strip()
         message = urlencode({"message": "Documento aprobado"})
@@ -592,12 +593,13 @@ def build_app(settings: Settings) -> FastAPI:
     @app.post("/documents/{document_id}/delete", include_in_schema=False)
     def delete_from_list(
         document_id: str,
+        request: Request,
         redirect_query: str = Form(default=""),
         deleted_by: str = Form(default=""),
     ) -> RedirectResponse:
         review_service.delete_document(
             document_id=document_id,
-            deleted_by=deleted_by.strip() or settings.default_reviewer,
+            deleted_by=deleted_by.strip() or _reviewer_from_request(request),
         )
         query = redirect_query.strip()
         message = urlencode({"message": "Albarán movido a la papelera"})
@@ -626,6 +628,7 @@ def build_app(settings: Settings) -> FastAPI:
     @app.post("/documents/{document_id}/purge", include_in_schema=False)
     def purge_from_list(
         document_id: str,
+        request: Request,
         redirect_query: str = Form(default=""),
     ) -> RedirectResponse:
         # Hard-delete: borrado físico irreversible. Solo desde la papelera.
@@ -634,30 +637,29 @@ def build_app(settings: Settings) -> FastAPI:
         )
 
         # ------------------------------------------------------------ #
-        # FIX (jun 2026) — avisar a sv7 de la purga.
+        # Limpieza del dedup tras la purga.
         #
-        # Sin este evento, los workflow_runs del orquestador seguían
-        # vivos tras el hard-delete y su dedup por attachment_sha256
-        # respondía "PDF ya procesado" al reenviar el mismo albarán,
-        # aunque ya no existía en el portal (bug reportado). sv7 marca
-        # esos workflows como 'purged' y deja de bloquear el contenido.
-        # Best-effort: si sv7 está caído, la purga local YA está hecha;
-        # el operador puede purgar de nuevo otro documento o reintentar.
+        # Sin esto, las filas de workflow_runs seguían vivas tras el
+        # hard-delete y su dedup por attachment_sha256 respondía "PDF ya
+        # procesado" al reenviar el mismo albarán, aunque ya no existía
+        # en el portal. Ahora el adapter de colas borra esas filas
+        # directamente (misma BBDD). Best-effort: si falla, la purga
+        # local YA está hecha y se puede reintentar.
         # ------------------------------------------------------------ #
         now_utc = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         orch: OrchestratorClient = app.state.orchestrator_client
         outcome = orch.notify_document_purged(
             document_id=document_id,
             source_sha256=source_sha256,
-            purged_by=settings.default_reviewer,
+            purged_by=_reviewer_from_request(request),
             purged_at_utc=now_utc,
         )
         if outcome is None:
             logger.warning(
-                "[purge] sv7 no confirmó document-purged doc=%s; el "
+                "[purge] no se confirmó la limpieza de dedup doc=%s; el "
                 "borrado local SÍ se aplicó. Si reenvías el mismo PDF y "
-                "sv7 lo marca como duplicado, reintenta la purga con sv7 "
-                "levantado.",
+                "aparece como duplicado, revisa el log del purger "
+                "(tabla/columna de workflow_runs) y reintenta la purga.",
                 document_id,
             )
 
@@ -950,7 +952,7 @@ def build_app(settings: Settings) -> FastAPI:
     # revisor puede pulsar otra vez.
     # ------------------------------------------------------------------ #
     @app.post("/api/documents/{document_id}/valuate")
-    def valuate_document_api(document_id: str) -> dict:
+    def valuate_document_api(document_id: str, request: Request) -> dict:
         # 1) Verificar que el documento existe localmente.
         preview = review_service.get_document(document_id)
         if preview is None:
@@ -980,12 +982,13 @@ def build_app(settings: Settings) -> FastAPI:
         #    timestamp ISO al segundo) → idempotente.
         now_utc = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         client: OrchestratorClient = app.state.orchestrator_client
+        reviewer = _reviewer_from_request(request)
         outcome: dict | None = None
         try:
             outcome = client.notify_contract_selected(
                 document_id=document_id,
                 codigo_contrato=codigo_contrato,
-                selected_by=settings.default_reviewer,
+                selected_by=reviewer,
                 selected_at_utc=now_utc,
             )
         except Exception:
@@ -993,7 +996,7 @@ def build_app(settings: Settings) -> FastAPI:
             # versión futura cambia el contrato. NO propagamos: el
             # usuario pulsó un botón y queremos darle feedback.
             logger.exception(
-                "[valuate][api] error inesperado notificando sv7 "
+                "[valuate][api] error inesperado publicando valoración "
                 "document_id=%s codigo=%s",
                 document_id, codigo_contrato,
             )
@@ -1014,13 +1017,12 @@ def build_app(settings: Settings) -> FastAPI:
         detail = (outcome or {}).get("detail")
         if not orchestrator_ok:
             message = (
-                "No se pudo contactar con el orquestador (sv7). La "
-                "selección de contrato SÍ está guardada; arranca el "
-                "sv7 y pulsa \"Valorar ahora\" de nuevo."
+                "No se pudo encolar la valoración. La selección de "
+                "contrato SÍ está guardada; reintenta en unos segundos."
             )
         elif action == "no_op":
             message = (
-                "El orquestador no encontró nada que valorar: "
+                "No se encontró nada que valorar: "
                 f"{detail or 'sin detalle'}."
             )
         else:
@@ -1032,7 +1034,7 @@ def build_app(settings: Settings) -> FastAPI:
         logger.info(
             "[valuate][api] document_id=%s codigo=%s reviewer=%s "
             "orchestrator_ok=%s action=%s",
-            document_id, codigo_contrato, settings.default_reviewer,
+            document_id, codigo_contrato, reviewer,
             orchestrator_ok, action,
         )
         return {

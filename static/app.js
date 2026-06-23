@@ -2181,7 +2181,77 @@
         } catch (_) { /* best-effort: la cabecera queda como estaba */ }
     }
 
+    // Modo COLAS (jun 2026): el re-fetch es ASÍNCRONO. sv4 publica en
+    // q-persistencia y sv3 (worker, puede arrancar en frío) re-consulta
+    // Sigrid + UPSERT de contratos en segundo plano. No hay resultado
+    // inmediato (status="queued"), así que sondeamos el documento hasta
+    // que aparezcan contratos (o se seleccione uno) y recargamos. Con
+    // timeout para no quedarnos colgados si sv3 sigue sin encontrar nada.
+    async function pollUntilContratosOrReload(baselineCount, maxMs) {
+        const started = Date.now();
+        const intervalMs = 3000;
+        async function poll() {
+            const elapsed = Date.now() - started;
+            const secsLeft = Math.max(0, Math.ceil((maxMs - elapsed) / 1000));
+            paintStatus(
+                "info",
+                "Re-búsqueda encolada. Esperando a Sigrid\u2026 (" + secsLeft + " s)"
+            );
+            try {
+                const resp = await fetch(
+                    `/api/documents/${documentId}`,
+                    { headers: { "Accept": "application/json" } }
+                );
+                if (resp.ok) {
+                    const doc = await resp.json();
+                    const n = (doc && doc.contratos) ? doc.contratos.length : 0;
+                    if (n > baselineCount
+                        || (doc && doc.selected_contrato_codigo)) {
+                        paintStatus("success", "Contratos actualizados. Recargando\u2026");
+                        setTimeout(function () { window.location.reload(); }, 500);
+                        return;
+                    }
+                }
+            } catch (_) { /* reintenta en el siguiente tick */ }
+
+            if (elapsed >= maxMs) {
+                // Timeout: sv3 no devolvió contratos nuevos (puede ser
+                // legítimo: CIF/obra sin contrato). Refrescamos la cabecera
+                // en sitio (sv3 pudo canonizar proveedor/obra) y dejamos
+                // reintentar.
+                paintStatus(
+                    "warning",
+                    "Sin contratos nuevos por ahora. Cabecera actualizada; "
+                    + "recarga o reintenta en unos segundos."
+                );
+                refreshHeaderFromServer();
+                setButtonsDisabled(false);
+                return;
+            }
+            setTimeout(poll, intervalMs);
+        }
+        poll();
+    }
+
     function handleRefetchOutcome(outcome) {
+        // Re-fetch asíncrono (colas): arranca el sondeo y sale.
+        if (outcome && outcome.status === "queued") {
+            setButtonsDisabled(true);
+            paintStatus("info", outcome.message || "Re-búsqueda encolada\u2026");
+            fetch(
+                `/api/documents/${documentId}`,
+                { headers: { "Accept": "application/json" } }
+            )
+                .then(function (r) { return r.ok ? r.json() : null; })
+                .then(function (doc) {
+                    const base = (doc && doc.contratos)
+                        ? doc.contratos.length : 0;
+                    pollUntilContratosOrReload(base, 60000);
+                })
+                .catch(function () { pollUntilContratosOrReload(0, 60000); });
+            return;
+        }
+
         const kind = {
             found_single: "success",
             found_multiple: "success",

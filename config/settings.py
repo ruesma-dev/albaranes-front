@@ -83,52 +83,23 @@ class Settings(BaseSettings):
     default_reviewer: str | None = Field(None, alias="DEFAULT_REVIEWER")
 
     # ------------------------------------------------------------ #
-    # Cliente al orquestador (sv7).
-    # sv4 emite dos tipos de evento al orquestador:
-    #   - contract-selected: el revisor cambió/eligió el contrato.
-    #   - document-approved: el revisor aprobó el documento.
-    # Las llamadas son best-effort (BackgroundTask + cliente que
-    # silencia errores) — si sv7 está caído, el save del revisor
-    # no se rompe.
-    # ------------------------------------------------------------ #
-    sv7_base_url: str = Field("http://127.0.0.1:8005", alias="SV7_BASE_URL")
-    sv7_timeout_s: float = Field(5.0, alias="SV7_TIMEOUT_S")
-    sv7_path_contract_selected: str = Field(
-        "/v1/events/contract-selected",
-        alias="SV7_PATH_CONTRACT_SELECTED",
-    )
-    sv7_path_document_approved: str = Field(
-        "/v1/events/document-approved",
-        alias="SV7_PATH_DOCUMENT_APPROVED",
-    )
-    sv7_path_document_purged: str = Field(
-        "/v1/events/document-purged",
-        alias="SV7_PATH_DOCUMENT_PURGED",
-    )
-
-    # ------------------------------------------------------------ #
-    # Cliente al persistencia/contratos (sv3).
+    # Colas (sustituyen a los antiguos clientes HTTP a sv7 y sv3).
     #
-    # Usado por el endpoint del portal POST /api/documents/{id}/
-    # re-fetch-contratos: cuando el revisor pulsa "Volver a buscar"
-    # tras editar CIF/obra, el sv4 hace POST al sv3 que reutiliza su
-    # ContratoEnrichmentService (con UPSERT por sigrid_ide).
+    # sv4 ya NO llama por HTTP a sv7 (disuelto) ni a sv3. En su lugar
+    # publica mensajes en las colas del sistema mediante el publicador
+    # de ``ruesma_comun.colas`` (best-effort):
+    #   - Elegir/cambiar contrato  → MensajeValoracion(force=True) → q-valoracion
+    #   - Aprobar documento        → MensajeFeedback              → q-feedback
+    #   - Re-fetch de contratos    → MensajePersistencia(force=True) → q-persistencia
+    #   - Purga (hard-delete)      → limpieza directa de workflow_runs (BBDD)
     #
-    # Timeout más generoso que sv7 porque esta llamada SÍ ejecuta
-    # trabajo síncrono: consulta a Sigrid (puede tardar segundos) +
-    # UPSERT en BBDD + opcional descarga/subida de PDF a SharePoint.
-    # 60s es conservador.
+    # La conexión a las colas la resuelve ``construir_publicador`` leyendo
+    # del ENTORNO (no de este settings):
+    #   - COLAS_ACCOUNT_URL          (managed identity en Azure)
+    #   - COLAS_CONNECTION_STRING    (local/Azurite)
+    # Por eso aquí no hay campos COLAS_*: ``extra="ignore"`` los tolera y
+    # comun los consume directamente vía os.environ.
     # ------------------------------------------------------------ #
-    sv3_base_url: str = Field(
-        "http://127.0.0.1:8001",
-        alias="SV3_BASE_URL",
-    )
-    sv3_timeout_s: float = Field(60.0, alias="SV3_TIMEOUT_S")
-    sv3_path_refetch_contratos: str = Field(
-        "/v1/albaranes/{document_id}/re-fetch-contratos",
-        alias="SV3_PATH_REFETCH_CONTRATOS",
-    )
-
     # ------------------------------------------------------------ #
     # Sigrid API — SOLO LECTURA para los desplegables de cabecera
     # (elegir proveedor / obra). NO reintroduce el camino de escritura
