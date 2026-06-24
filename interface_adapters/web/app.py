@@ -40,6 +40,7 @@ from infrastructure.colas.colas_orchestrator_client import ColasOrchestratorClie
 from infrastructure.colas.colas_refetch_client import ColasRefetchClient
 from infrastructure.sigrid.sigrid_lookup_client import SigridLookupClient
 from ruesma_comun.colas import construir_publicador
+from ruesma_comun.colas.arranque import ConfiguracionColasAusenteError
 from ruesma_comun.colas.publicador import PublicadorBestEffort
 
 logger = logging.getLogger(__name__)
@@ -190,6 +191,31 @@ class ConciliacionEditBody(BaseModel):
         return s or None
 
 
+class _PublicadorColasNulo:
+    """Publicador no-op para correr el portal en LOCAL sin colas (sin
+    Azurite ni workers): ``solo-front``.
+
+    Cumple la MISMA interfaz que ``PublicadorBestEffort`` (``.publicar(...)``
+    devuelve ``bool``) y SIEMPRE devuelve ``False``: el dato fundamental ya
+    se persiste en BBDD antes de publicar, y los endpoints informan con
+    honestidad de que no se encoló (no dicen "encolada" si no lo está). Se
+    usa solo como fallback cuando NO hay ``COLAS_CONNECTION_STRING`` ni
+    ``COLAS_ACCOUNT_URL`` en el entorno; en producción JAMÁS se usa (allí
+    ``COLAS_ACCOUNT_URL`` está definida por el Container App).
+    """
+
+    def publicar(self, nombre_cola: str, mensaje: Any) -> bool:
+        logger.warning(
+            "[colas] publicador NULO (modo solo-front): descarto mensaje "
+            "tipo=%s document_id=%s -> %s. Define COLAS_CONNECTION_STRING "
+            "(local) o COLAS_ACCOUNT_URL (nube) para encolar de verdad.",
+            getattr(mensaje, "tipo", "?"),
+            getattr(mensaje, "document_id", "?"),
+            nombre_cola,
+        )
+        return False
+
+
 def build_app(settings: Settings) -> FastAPI:
     session_factory = SessionFactory(
         database_url=settings.database_url,
@@ -226,9 +252,28 @@ def build_app(settings: Settings) -> FastAPI:
     # pérdida es recuperable a mano. Si no publica, el endpoint informa
     # al revisor con honestidad (no dice "encolada" si no lo está).
     # ------------------------------------------------------------------ #
-    publicador = PublicadorBestEffort(
-        construir_publicador(emitido_por="ca-sv4-front")
-    )
+    # ------------------------------------------------------------------ #
+    # FALLBACK solo-front (jun 2026): si NO hay COLAS_* en el entorno, el
+    # portal arranca igualmente con un publicador NULO. Asi puedes correr
+    # SOLO el front (uvicorn / main.py) contra el Postgres de dev para
+    # iterar la UI, SIN Azurite ni workers. Las acciones que encolan
+    # (valorar/refetch/aprobar) no enviaran mensajes — el dato se guarda en
+    # BBDD y el endpoint lo dice con honestidad. En produccion siempre hay
+    # COLAS_ACCOUNT_URL, asi que se usa el publicador real.
+    # ------------------------------------------------------------------ #
+    try:
+        publicador = PublicadorBestEffort(
+            construir_publicador(emitido_por="ca-sv4-front")
+        )
+    except ConfiguracionColasAusenteError:
+        logger.warning(
+            "[colas][wiring] COLAS_* no configuradas -> publicador NULO "
+            "(modo solo-front, sin Azurite ni workers). El portal arranca y "
+            "guarda en BBDD; las acciones que encolan no enviaran mensajes. "
+            "Define COLAS_CONNECTION_STRING (local) o COLAS_ACCOUNT_URL (nube) "
+            "para activarlas."
+        )
+        publicador = _PublicadorColasNulo()
 
     # Re-fetch de contratos (antes Sv3RefetchClient → sv3 HTTP síncrono).
     # Ahora re-publica q-persistencia con force=True (sv3 re-ejecuta su
@@ -687,6 +732,29 @@ def build_app(settings: Settings) -> FastAPI:
         if document is None:
             raise HTTPException(status_code=404, detail="Documento no encontrado")
 
+        # -------------------------------------------------------------- #
+        # Navegacion anterior/siguiente (jun 2026): recorre el MISMO
+        # conjunto ordenado+filtrado de la bandeja (cruzando paginas). Los
+        # filtros viajan en la query del enlace que abrio este detalle
+        # (ver documents_list.html). Si no hay query (acceso directo al
+        # detalle), se usan los filtros por defecto del modelo.
+        # -------------------------------------------------------------- #
+        nav_filters = _filters_from_query(
+            request, default_page_size=settings.default_page_size
+        )
+        nav_query = _query_string(nav_filters)
+        prev_id, next_id = review_service.get_neighbor_ids(
+            document_id=document_id, filters=nav_filters
+        )
+
+        def _detail_url(doc_id: str) -> str:
+            extra: dict[str, Any] = {}
+            if requested_view != VIEW_MODE_MERGE:
+                extra["view"] = requested_view
+            tail = urlencode(extra)
+            q = "&".join(part for part in (nav_query, tail) if part)
+            return f"/documents/{doc_id}?{q}" if q else f"/documents/{doc_id}"
+
         context = {
             "request": request,
             "title": settings.app_title,
@@ -698,6 +766,9 @@ def build_app(settings: Settings) -> FastAPI:
             "current_view": document.view_mode,
             "available_views": document.available_views,
             "view_label": _view_label,
+            "back_to_list_url": f"/documents?{nav_query}" if nav_query else "/documents",
+            "nav_prev_url": _detail_url(prev_id) if prev_id else None,
+            "nav_next_url": _detail_url(next_id) if next_id else None,
         }
         return templates.TemplateResponse(
             request=request,
@@ -1243,6 +1314,66 @@ def _query_string(
             for key, value in payload.items()
             if value not in (None, "")
         }
+    )
+
+
+def _filters_from_query(
+    request: Request,
+    *,
+    default_page_size: int,
+) -> DocumentListFilters:
+    """Reconstruye los filtros de la BANDEJA a partir de la query del
+    detalle. Sirve para que los botones anterior/siguiente recorran el
+    mismo conjunto ordenado que el revisor venia mirando en la lista.
+
+    A diferencia de la ruta ``/documents`` (que usa ``Query(...)`` con
+    validacion estricta y devuelve 422 si algo no parsea), aqui somos
+    TOLERANTES: un parametro roto en la URL no debe tumbar la pagina de
+    detalle. Los numeros que no parsean quedan en None y page/page_size
+    se acotan al rango valido del modelo.
+    """
+    q = request.query_params
+
+    def _f(name: str) -> float | None:
+        raw = q.get(name)
+        if raw is None or not raw.strip():
+            return None
+        try:
+            return float(raw.strip())
+        except ValueError:
+            return None
+
+    def _i(name: str, default: int) -> int:
+        raw = q.get(name)
+        if raw is None or not raw.strip():
+            return default
+        try:
+            return int(raw.strip())
+        except ValueError:
+            return default
+
+    page = max(1, _i("page", 1))
+    page_size = min(100, max(1, _i("page_size", default_page_size)))
+
+    return DocumentListFilters(
+        search=q.get("search"),
+        proveedor=q.get("proveedor"),
+        fecha=q.get("fecha"),
+        obra=q.get("obra"),
+        albaran=q.get("albaran"),
+        contrato=q.get("contrato"),
+        lineas=q.get("lineas"),
+        min_importe=_f("min_importe"),
+        max_importe=_f("max_importe"),
+        approved=q.get("approved", "pending"),
+        review_required=q.get("review_required", "all"),
+        min_confidence=_f("min_confidence"),
+        max_confidence=_f("max_confidence"),
+        sort_by=q.get("sort_by", "confidence_pct_calc"),
+        sort_dir=q.get("sort_dir", "asc"),
+        vista=q.get("vista", "activos"),
+        page=page,
+        page_size=page_size,
     )
 
 

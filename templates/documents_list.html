@@ -56,22 +56,22 @@
         <button type="submit" class="filter-submit-hidden" tabindex="-1" aria-hidden="true">Filtrar</button>
     </form>
     <div class="table-scroll">
-        <table class="table docs-table">
+        <table class="table docs-table" data-cols-store="sv4.listCols" data-reorderable="1">
             <thead>
             <tr>
-                <th class="sticky-col">Acciones</th>
-                <th><a href="/documents?{{ build_sort_query('proveedor_nombre') }}">Proveedor</a></th>
-                <th><a href="/documents?{{ build_sort_query('fecha') }}">Fecha</a></th>
-                <th><a href="/documents?{{ build_sort_query('obra_codigo') }}">Obra</a></th>
-                <th><a href="/documents?{{ build_sort_query('numero_albaran') }}">Albarán</a></th>
-                <th class="num-cell">Importe valorado</th>
-                <th>Contrato</th>
-                <th><a href="/documents?{{ build_sort_query('confidence_pct_calc') }}">Confianza</a></th>
-                <th><a href="/documents?{{ build_sort_query('approved') }}">Aprobado</a></th>
-                <th class="lineas-col">Líneas valoradas</th>
+                <th class="sticky-col" data-col="acciones" data-col-fixed>Acciones</th>
+                <th data-col="proveedor" draggable="true"><a draggable="false" href="/documents?{{ build_sort_query('proveedor_nombre') }}">Proveedor</a>{% if filters.sort_by == 'proveedor_nombre' %}<span class="sort-arrow">{{ '▲' if filters.sort_dir == 'asc' else '▼' }}</span>{% endif %}</th>
+                <th data-col="fecha" draggable="true"><a draggable="false" href="/documents?{{ build_sort_query('fecha') }}">Fecha</a>{% if filters.sort_by == 'fecha' %}<span class="sort-arrow">{{ '▲' if filters.sort_dir == 'asc' else '▼' }}</span>{% endif %}</th>
+                <th data-col="obra" draggable="true"><a draggable="false" href="/documents?{{ build_sort_query('obra_codigo') }}">Obra</a>{% if filters.sort_by == 'obra_codigo' %}<span class="sort-arrow">{{ '▲' if filters.sort_dir == 'asc' else '▼' }}</span>{% endif %}</th>
+                <th data-col="albaran" draggable="true"><a draggable="false" href="/documents?{{ build_sort_query('numero_albaran') }}">Albarán</a>{% if filters.sort_by == 'numero_albaran' %}<span class="sort-arrow">{{ '▲' if filters.sort_dir == 'asc' else '▼' }}</span>{% endif %}</th>
+                <th class="num-cell" data-col="importe" draggable="true">Importe valorado</th>
+                <th data-col="contrato" draggable="true">Contrato</th>
+                <th data-col="confianza" draggable="true"><a draggable="false" href="/documents?{{ build_sort_query('confidence_pct_calc') }}">Confianza</a>{% if filters.sort_by == 'confidence_pct_calc' %}<span class="sort-arrow">{{ '▲' if filters.sort_dir == 'asc' else '▼' }}</span>{% endif %}</th>
+                <th data-col="aprobado" draggable="true"><a draggable="false" href="/documents?{{ build_sort_query('approved') }}">Aprobado</a>{% if filters.sort_by == 'approved' %}<span class="sort-arrow">{{ '▲' if filters.sort_dir == 'asc' else '▼' }}</span>{% endif %}</th>
+                <th class="lineas-col" data-col="lineas" draggable="true">Líneas valoradas</th>
             </tr>
             <tr class="filter-row">
-                <th class="sticky-col">
+                <th class="sticky-col" data-col="acciones" data-col-fixed>
                     <div class="filter-acciones">
                         <a href="/documents" class="btn small secondary">Limpiar</a>
                         <select name="page_size" form="docFilters" onchange="this.form.submit()" title="Filas por página" aria-label="Filas por página">
@@ -81,18 +81,18 @@
                         </select>
                     </div>
                 </th>
-                <th><input type="text" name="proveedor" value="{{ filters.proveedor or '' }}" form="docFilters" placeholder="Filtrar…"></th>
-                <th><input type="text" name="fecha" value="{{ filters.fecha or '' }}" form="docFilters" placeholder="AAAA-MM-DD"></th>
-                <th><input type="text" name="obra" value="{{ filters.obra or '' }}" form="docFilters" placeholder="Filtrar…"></th>
-                <th><input type="text" name="albaran" value="{{ filters.albaran or '' }}" form="docFilters" placeholder="Filtrar…"></th>
-                <th class="num-cell">
+                <th data-col="proveedor"><input type="text" name="proveedor" value="{{ filters.proveedor or '' }}" form="docFilters" placeholder="Filtrar…"></th>
+                <th data-col="fecha"><input type="text" name="fecha" value="{{ filters.fecha or '' }}" form="docFilters" placeholder="AAAA-MM-DD"></th>
+                <th data-col="obra"><input type="text" name="obra" value="{{ filters.obra or '' }}" form="docFilters" placeholder="Filtrar…"></th>
+                <th data-col="albaran"><input type="text" name="albaran" value="{{ filters.albaran or '' }}" form="docFilters" placeholder="Filtrar…"></th>
+                <th class="num-cell" data-col="importe">
                     <div class="filter-importe">
                         <input type="number" step="0.01" min="0" name="min_importe" value="{{ filters.min_importe if filters.min_importe is not none else '' }}" form="docFilters" placeholder="mín" title="Importe mínimo">
                         <input type="number" step="0.01" min="0" name="max_importe" value="{{ filters.max_importe if filters.max_importe is not none else '' }}" form="docFilters" placeholder="máx" title="Importe máximo">
                     </div>
                 </th>
-                <th><input type="text" name="contrato" value="{{ filters.contrato or '' }}" form="docFilters" placeholder="Filtrar…"></th>
-                <th>
+                <th data-col="contrato"><input type="text" name="contrato" value="{{ filters.contrato or '' }}" form="docFilters" placeholder="Filtrar…"></th>
+                <th data-col="confianza">
                     <div class="filter-confianza">
                         <input type="number" step="0.01" min="0" max="100" name="min_confidence" value="{{ filters.min_confidence if filters.min_confidence is not none else '' }}" form="docFilters" placeholder="mín" title="Confianza mínima">
                         <input type="number" step="0.01" min="0" max="100" name="max_confidence" value="{{ filters.max_confidence if filters.max_confidence is not none else '' }}" form="docFilters" placeholder="máx" title="Confianza máxima">
@@ -103,20 +103,20 @@
                         </select>
                     </div>
                 </th>
-                <th>
+                <th data-col="aprobado">
                     <select name="approved" form="docFilters" onchange="this.form.submit()">
                         <option value="pending" {% if filters.approved == 'pending' %}selected{% endif %}>Pendientes</option>
                         <option value="approved" {% if filters.approved == 'approved' %}selected{% endif %}>Aprobados</option>
                         <option value="all" {% if filters.approved == 'all' %}selected{% endif %}>Todos</option>
                     </select>
                 </th>
-                <th><input type="text" name="lineas" value="{{ filters.lineas or '' }}" form="docFilters" placeholder="Buscar línea…"></th>
+                <th data-col="lineas"><input type="text" name="lineas" value="{{ filters.lineas or '' }}" form="docFilters" placeholder="Buscar línea…"></th>
             </tr>
             </thead>
             <tbody>
             {% for item in result.items %}
                 <tr>
-                    <td class="actions-td sticky-col">
+                    <td class="actions-td sticky-col" data-col="acciones">
                         <div class="actions-cell">
                         {% if filters.vista == 'papelera' %}
                             <form method="post" action="/documents/{{ item.id }}/restore">
@@ -153,29 +153,29 @@
                         {% endif %}
                         </div>
                     </td>
-                    <td>
-                        <a class="link-strong" href="/documents/{{ item.id }}">{{ item.proveedor_nombre or '—' }}</a>
+                    <td data-col="proveedor">
+                        <a class="link-strong" href="/documents/{{ item.id }}{% if current_query %}?{{ current_query }}{% endif %}">{{ item.proveedor_nombre or '—' }}</a>
                     </td>
-                    <td>
+                    <td data-col="fecha">
                         <div>{{ item.fecha or '—' }}</div>
                         {% set _recv = item.created_at_utc | fecha_hora_local %}
                         {% if _recv %}<div class="muted small">Recibido {{ _recv }}</div>{% endif %}
                     </td>
-                    <td>
+                    <td data-col="obra">
                         <div>{{ item.obra_codigo or '—' }}</div>
                         {% if item.obra_nombre %}
                             <div class="muted small">{{ item.obra_nombre }}</div>
                         {% endif %}
                     </td>
-                    <td>{{ item.numero_albaran or '—' }}</td>
-                    <td class="num-cell">
+                    <td data-col="albaran">{{ item.numero_albaran or '—' }}</td>
+                    <td class="num-cell" data-col="importe">
                         {% if item.total_valorado is not none %}
                             {{ item.total_valorado | importe_eur }}
                         {% else %}
                             —
                         {% endif %}
                     </td>
-                    <td>
+                    <td data-col="contrato">
                         {% if item.contrato_codigo %}
                             <div class="link-strong">{{ item.contrato_codigo }}</div>
                             {% if item.contrato_nombre %}
@@ -185,7 +185,7 @@
                             —
                         {% endif %}
                     </td>
-                    <td>
+                    <td data-col="confianza">
                         {% if item.confidence_pct_calc is not none %}
                             <span class="confidence-badge {{ 'low' if item.confidence_pct_calc < 80 else 'ok' }}">
                                 {{ '%.1f'|format(item.confidence_pct_calc) }}%
@@ -197,14 +197,14 @@
                             <div class="muted small">Revisión requerida</div>
                         {% endif %}
                     </td>
-                    <td>
+                    <td data-col="aprobado">
                         {% if item.approved %}
                             <span class="status-pill approved">Aprobado</span>
                         {% else %}
                             <span class="status-pill pending">Pendiente</span>
                         {% endif %}
                     </td>
-                    <td class="lineas-cell" title="{{ item.source_filename }}">
+                    <td class="lineas-cell" data-col="lineas" title="{{ item.source_filename }}">
                         {% if item.lines %}
                             {% for ln in item.lines %}
                                 <div class="linea-rev{% if ln.kind == 'synthetic_modifier' %} is-mod{% endif %}">

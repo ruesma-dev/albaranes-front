@@ -73,6 +73,15 @@
             try { return JSON.parse(dataTag.textContent).id; } catch (_) { return null; }
         })();
 
+    // TANDA 2A: datos completos del documento (incluye document.lines, las
+    // líneas BLANCAS del albarán). Ahora las blancas son SOLO LECTURA y ya
+    // NO viven en el grid editable; las reenviamos intactas en el PUT desde
+    // aquí, porque update_document BORRA las líneas merge que no lleguen en
+    // payload.lines. Sin esto, guardar la cabecera vaciaría el albarán.
+    let DOC_DATA = {};
+    try { DOC_DATA = JSON.parse(dataTag.textContent) || {}; } catch (_) { DOC_DATA = {}; }
+    window.__documentData = DOC_DATA;
+
     const addLineBtn = document.getElementById("add-line-btn");
     const undoBtn = document.getElementById("undo-btn");
     const saveBtn = document.getElementById("save-btn");
@@ -112,8 +121,14 @@
         if (!row) return;
         const combo = row.querySelector(".js-concilia-combo");
         if (!combo) return;
-        const inp = combo.querySelector(".combo-input");
-        if (inp) { inp.focus(); }
+        // TANDA 2B: el combo de línea de contrato está OCULTO por defecto
+        // (concepto a una sola línea). El ✎ lo abre/cierra; al abrir, foco.
+        const willOpen = !combo.classList.contains("is-open");
+        combo.classList.toggle("is-open", willOpen);
+        if (willOpen) {
+            const inp = combo.querySelector(".combo-input");
+            if (inp) { inp.focus(); }
+        }
     });
 
     // Boton "Borrar" de la fila salmon: elimina DEFINITIVAMENTE la
@@ -389,7 +404,7 @@
     }
     initConciliaCombos();
 
-    linesBody.addEventListener("click", function (evt) {
+    document.addEventListener("click", function (evt) {
         const btn = evt.target.closest ? evt.target.closest(".js-add-concilia") : null;
         if (!btn) return;
         const tr = btn.closest("tr");
@@ -410,7 +425,7 @@
         td1.appendChild(badge);
         const td2 = document.createElement("td");
         td2.className = "concilia-td";
-        td2.colSpan = 9;
+        td2.colSpan = 8;
         const sel = document.createElement("select");
         sel.className = "concilia-select js-add-concilia-select";
         sel.dataset.mergeId = mergeId;
@@ -454,7 +469,7 @@
         addCombo.querySelector(".combo-input").focus();
     });
 
-    linesBody.addEventListener("change", async function (evt) {
+    document.addEventListener("change", async function (evt) {
         const sel = evt.target.closest ? evt.target.closest(".js-add-concilia-select") : null;
         if (!sel) return;
         const mergeId = sel.dataset.mergeId;
@@ -516,9 +531,10 @@
     }
 
     function collectMergeIdsSinCasar() {
-        // Las líneas SIN conciliación son las que tienen el botón "+".
+        // Las líneas SIN conciliación son las que tienen el botón "+"
+        // (ahora en la tabla blanca de solo lectura, fuera de linesBody).
         const out = [];
-        linesBody.querySelectorAll(".js-add-concilia").forEach(function (btn) {
+        document.querySelectorAll(".js-add-concilia").forEach(function (btn) {
             const tr = btn.closest("tr");
             const mergeId = tr ? (tr.dataset.lineId || "").trim() : "";
             if (mergeId) out.push(mergeId);
@@ -808,9 +824,160 @@
         document.querySelectorAll(
             "tr.concilia-editable .js-partida-combo"
         ).forEach(function (inp) {
-            attachInputCombo(inp);
+            attachContratoLineCombo(inp);
         });
     }
+
+    // ----------------------------------------------------------------- //
+    // Combo de LÍNEA DE CONTRATO sobre la fila salmón (jun 2026).
+    //
+    // Se engancha TANTO al input de PARTIDA (.js-partida-combo) como al de
+    // CONCEPTO (.js-concepto-combo). Busca en las LÍNEAS DE CONTRATO de
+    // Sigrid (embebidas en CONTRATO_LINES) filtrando por código o por
+    // descripción. Al ELEGIR una línea, en lugar de escribir solo un campo,
+    // RELLENA los cuatro: partida, concepto (descripción), unidad y precio
+    // unitario, y recalcula el importe. (La cantidad NO se toca: es la
+    // recibida del albarán.) Dispara 'input' en cada campo para que
+    // wireConciliaEdit marque dirty y sincronice importe. No reconcilia con
+    // Sigrid (eso sigue siendo el ✎ de Origen): al guardar, si cambió la
+    // identidad de una fila Sigrid, pasará a NUEVA conservando el resto.
+    // ----------------------------------------------------------------- //
+    function _contratoLineItems() {
+        return (CONTRATO_LINES || []).map(function (l) {
+            const lab = l.label || l.desc || "";
+            return {
+                label: lab,
+                desc: (l.desc != null ? l.desc : ""),
+                part: (l.part != null ? l.part : ""),
+                unidad: (l.unidad != null ? l.unidad : ""),
+                precio: (l.precio != null ? l.precio : null),
+                norm: _normLine(lab),
+            };
+        }).filter(function (it) { return it.label !== ""; });
+    }
+
+    function _setRowField(tr, field, val) {
+        const el = tr.querySelector('[data-field="' + field + '"]');
+        if (!el) { return; }
+        el.value = (val === null || val === undefined) ? "" : String(val);
+        // Notifica a wireConciliaEdit (dirty + sincroniza importe). El combo
+        // de cada input ignora este 'input' si el campo no tiene el foco.
+        el.dispatchEvent(new Event("input", { bubbles: true }));
+    }
+
+    function attachContratoLineCombo(input) {
+        if (!input || input.dataset.contratoComboAttached) { return; }
+        input.dataset.contratoComboAttached = "1";
+        const items = _contratoLineItems();
+
+        const wrap = document.createElement("div");
+        wrap.className = "combo combo-lines combo-concepto";
+        input.parentNode.insertBefore(wrap, input);
+        wrap.appendChild(input);
+        const panel = document.createElement("div");
+        panel.className = "combo-panel";
+        panel.hidden = true;
+        wrap.appendChild(panel);
+
+        let shown = [];
+        let repos = null;
+        let justPicked = false;
+
+        function place() {
+            const r = input.getBoundingClientRect();
+            panel.style.top = (r.bottom + 4) + "px";
+            panel.style.left = r.left + "px";
+            panel.style.minWidth = Math.max(r.width, 280) + "px";
+            panel.style.maxWidth = "560px";
+        }
+        function close() {
+            panel.hidden = true;
+            if (repos) {
+                window.removeEventListener("scroll", repos, true);
+                window.removeEventListener("resize", repos);
+                repos = null;
+            }
+        }
+        function pick(it) {
+            justPicked = true;
+            const tr = input.closest("tr.conciliacion-row");
+            if (tr) {
+                // RELLENA los 4 campos desde la línea de contrato elegida.
+                // precio el ÚLTIMO para que el importe se recalcule con él.
+                _setRowField(tr, "codigo_partida", it.part);
+                _setRowField(tr, "descripcion", it.desc);
+                _setRowField(tr, "unidad", it.unidad);
+                _setRowField(tr, "precio_unitario",
+                    it.precio != null ? it.precio : "");
+            } else {
+                input.value = it.desc;
+                input.dispatchEvent(new Event("input", { bubbles: true }));
+            }
+            close();
+            input.focus();
+        }
+        function render() {
+            panel.innerHTML = "";
+            if (!shown.length) {
+                const d = document.createElement("div");
+                d.className = "combo-msg";
+                d.textContent = items.length ? "Sin coincidencias" : "Sin líneas de contrato";
+                panel.appendChild(d);
+            } else {
+                shown.forEach(function (it) {
+                    const d = document.createElement("div");
+                    d.className = "combo-item";
+                    d.textContent = it.label;
+                    d.addEventListener("mousedown", function (e) {
+                        e.preventDefault();
+                        pick(it);
+                    });
+                    panel.appendChild(d);
+                });
+            }
+            panel.hidden = false;
+            place();
+            if (!repos) {
+                repos = function (e) {
+                    if (e && e.type === "scroll" && e.target &&
+                        panel.contains(e.target)) { return; }
+                    close();
+                };
+                window.addEventListener("scroll", repos, true);
+                window.addEventListener("resize", repos);
+            }
+        }
+        function open() {
+            // Solo se abre si el input tiene el foco: así, cuando se
+            // rellenan programáticamente otros campos con combo (p.ej. al
+            // elegir desde concepto se rellena también partida), su combo
+            // NO se despliega.
+            if (document.activeElement !== input) { return; }
+            if (justPicked) { justPicked = false; return; }
+            const tokens = _normLine(input.value).split(/\s+/).filter(Boolean);
+            shown = items.filter(function (it) {
+                if (!tokens.length) { return true; }
+                return tokens.every(function (t) { return it.norm.indexOf(t) !== -1; });
+            });
+            render();
+        }
+
+        input.addEventListener("focus", open);
+        input.addEventListener("click", open);
+        input.addEventListener("input", open);
+        document.addEventListener("click", function (e) {
+            if (!wrap.contains(e.target)) { close(); }
+        });
+    }
+
+    function wireConceptoCombos() {
+        document.querySelectorAll(
+            "tr.concilia-editable .js-concepto-combo"
+        ).forEach(function (inp) {
+            attachContratoLineCombo(inp);
+        });
+    }
+
 
     function wireConciliaEdit() {
         linesBody.querySelectorAll("tr.concilia-editable").forEach(function (tr) {
@@ -932,6 +1099,7 @@
     }
     wireConciliaEdit();
     wirePartidaCombos();
+    wireConceptoCombos();
 
     // ------------------------------------------------------------------ //
     // "Guardar todas las líneas": guarda de una vez TODAS las filas salmón
@@ -1435,94 +1603,43 @@
     // lo mapeamos: importe → precio_neto.
     // --------------------------------------------------------------- //
     function collectLinesAndValuationUpdates() {
+        // TANDA 2A: las líneas BLANCAS (merge) ya no se editan en el grid
+        // (son solo lectura en su bloque colapsable). Las reenviamos TAL CUAL
+        // desde el JSON embebido del documento para que el PUT NO las borre
+        // (update_document elimina las merge que no lleguen en payload.lines).
+        // Las líneas SALMÓN (valoración) NO van por el PUT: se guardan con su
+        // PATCH propio (.../conciliacion/campos) vía «Guardar» de fila /
+        // «Guardar todas». Por eso valuation_line_updates va vacío.
         const merge_lines = [];
-        const valuation_updates = [];
-        const rows = linesBody.querySelectorAll("tr");
-        let merge_index = 0;
-
-        rows.forEach(function (row) {
-            // Las filas de conciliacion (NUEVA/SIGRID) NO son lineas
-            // editables: no tienen data-line-kind ni inputs data-field.
-            // No deben recolectarse; antes se enviaban como lineas vacias
-            // y el backend las insertaba como blancos en cada guardado (#2).
-            if (row.classList && row.classList.contains("conciliacion-row")) {
-                return;
-            }
-
-            const byField = {};
-            row.querySelectorAll("[data-field]").forEach(function (el) {
-                byField[el.dataset.field] = el;
-            });
-
-            const kind = row.dataset.lineKind || "from_albaran";
-
-            if (kind === "synthetic_modifier") {
-                const vlid = row.dataset.valuationLineId;
-                if (!vlid) {
-                    // Sin valuation_line_id no podemos UPDATE-arla;
-                    // silencioso: no se envía.
-                    return;
-                }
-                valuation_updates.push({
-                    valuation_line_id: Number(vlid),
-                    codigo_partida_final: readTextOrNull(byField.codigo_imputacion),
-                    descripcion_linea: readTextOrNull(byField.concepto),
-                    cantidad_albaran: readNumericOrNull(byField.cantidad),
-                    unidad_contrato: readTextOrNull(byField.unidad),
-                    precio_unitario_final: readNumericOrNull(byField.precio_unitario),
-                    importe_calculado: readNumericOrNull(byField.importe),
-                });
-                return;
-            }
-
-            // from_albaran (o fila nueva añadida por el usuario).
-            const _idRaw = row.dataset.lineId ? Number(row.dataset.lineId) : null;
-            const _codimp = readTextOrNull(byField.codigo_imputacion);
-            const _concepto = readTextOrNull(byField.concepto);
-            const _cantidad = readNumericOrNull(byField.cantidad);
-            // La blanca guarda lo leido/escrito por el usuario. El precio
-            // editable de la fila (precio_unitario) ES el precio declarado
-            // del albaran y se guarda en el merge.
-            const _precio = readNumericOrNull(byField.precio_unitario);
-            const _descuento = readNumericOrNull(byField.descuento);
-            const _importe = readNumericOrNull(byField.importe);
-            const _codigo = readTextOrNull(byField.codigo);
-
-            // Saltar filas VACIAS (#2): una linea recien añadida y no
-            // rellenada, o una que quedo en blanco, no debe enviarse. Si no
-            // tiene id, simplemente no se inserta. Si tiene id pero esta
-            // totalmente vacia, al no enviarla el backend la elimina, lo que
-            // limpia los blancos acumulados de guardados anteriores.
-            const _isEmpty = (
-                !_codimp && !_concepto && _cantidad === null &&
-                _precio === null && _descuento === null &&
-                _importe === null && !_codigo
-            );
-            if (_isEmpty) {
-                return;
-            }
-
-            merge_index += 1;
+        const src = (window.__documentData && Array.isArray(window.__documentData.lines))
+            ? window.__documentData.lines
+            : [];
+        let idx = 0;
+        src.forEach(function (ln) {
+            idx += 1;
+            const pick = function (k) {
+                return (ln && ln[k] !== undefined && ln[k] !== null) ? ln[k] : null;
+            };
             merge_lines.push({
-                id: _idRaw,
-                line_index: merge_index,
-                codigo_imputacion: _codimp,
-                concepto: _concepto,
-                cantidad: _cantidad,
-                precio: _precio,
-                descuento: _descuento,
-                // 'importe' en V3 == 'precio_neto' en el schema del backend.
-                precio_neto: _importe,
-                codigo: _codigo,
-                // 'unidad_display' y 'precio_unitario_display' NO se envían.
+                id: (ln && ln.id !== undefined && ln.id !== null) ? Number(ln.id) : null,
+                line_index: idx,
+                external_line_id: pick("external_line_id"),
+                cabecera_id: pick("cabecera_id"),
+                codigo: pick("codigo"),
+                cantidad: pick("cantidad"),
+                concepto: pick("concepto"),
+                precio: pick("precio"),
+                descuento: pick("descuento"),
+                precio_neto: pick("precio_neto"),
+                codigo_imputacion: pick("codigo_imputacion"),
+                confianza_pct: pick("confianza_pct"),
+                confidence_pct_calc: pick("confidence_pct_calc"),
+                line_match_score: pick("line_match_score"),
+                comparison_status_json: pick("comparison_status_json"),
+                field_scores_json: pick("field_scores_json"),
             });
-            // NOTA: las ediciones de la linea blanca van SOLO al merge. Ya
-            // NO se manda valuation_line_update para from_albaran: la
-            // valoracion (fila salmon) la fija la conciliacion con la linea
-            // de contrato, y la blanca nunca debe pisar/ser pisada por ella.
         });
-
-        return { merge_lines: merge_lines, valuation_updates: valuation_updates };
+        return { merge_lines: merge_lines, valuation_updates: [] };
     }
 
     // Compatibilidad hacia atrás: algún código externo podría llamar
@@ -2273,4 +2390,401 @@
 
     if (saveAndRefetchBtn) saveAndRefetchBtn.addEventListener("click", handleSaveAndRefetch);
     if (refetchOnlyBtn) refetchOnlyBtn.addEventListener("click", handleRefetchOnly);
+})();
+
+// ===================================================================== //
+//  TANDA 2B — Columnas de tabla GENÉRICAS: reordenar + ancho + orden.    //
+//                                                                         //
+//  Reutilizable en cualquier <table> que declare:                        //
+//    data-cols-store="clave"   -> prefijo localStorage (por usuario)      //
+//    data-resizable="1"        -> permite redimensionar (requiere         //
+//                                 <colgroup> con <col data-col data-w>)   //
+//    data-sortable="1"         -> orden por columna en cliente (▲▼)       //
+//  y, en cada <th>/<td>/<col>, data-col="clave". Columnas con            //
+//  data-col-fixed no se mueven (p.ej. la columna sticky de acciones).     //
+//  El ORDEN, ANCHO y ORDENACIÓN se guardan por usuario en localStorage    //
+//  (claves distintas por tabla), de modo que el grid de líneas y la       //
+//  tabla de la bandeja recuerdan su configuración por separado.          //
+// ===================================================================== //
+(function () {
+    "use strict";
+    var MIN_W = 56;
+
+    function rj(k) { try { return JSON.parse(localStorage.getItem(k) || "null"); } catch (e) { return null; } }
+    function wj(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} }
+
+    function enhanceTable(table) {
+        if (!table) { return null; }
+        var store = table.getAttribute("data-cols-store");
+        if (!store) { return null; }
+        var resizable = table.getAttribute("data-resizable") === "1";
+        var sortable = table.getAttribute("data-sortable") === "1";
+        var colgroup = table.querySelector("colgroup");
+        var theadRows = [].slice.call(table.querySelectorAll("thead tr"));
+        var headRow = null;
+        for (var i = 0; i < theadRows.length; i++) {
+            if (theadRows[i].querySelector("th[data-col]")) { headRow = theadRows[i]; break; }
+        }
+        if (!headRow) { return null; }
+        var tbody = table.querySelector("tbody");
+
+        var DEFAULT_ORDER = [].map.call(headRow.querySelectorAll("th[data-col]"),
+            function (th) { return th.getAttribute("data-col"); });
+        var FIXED = {};
+        [].forEach.call(headRow.querySelectorAll("th[data-col]"), function (th) {
+            if (th.hasAttribute("data-col-fixed")) { FIXED[th.getAttribute("data-col")] = true; }
+        });
+        var MOVABLE = DEFAULT_ORDER.filter(function (k) { return !FIXED[k]; });
+
+        var LS_ORDER = store + ".order.v1";
+        var LS_WIDTH = store + ".width.v1";
+        var LS_SORT = store + ".sort.v1";
+
+        function movableOrder() {
+            var saved = rj(LS_ORDER);
+            if (!Array.isArray(saved)) { return MOVABLE.slice(); }
+            var known = {}; MOVABLE.forEach(function (k) { known[k] = true; });
+            var out = saved.filter(function (k) { return known[k]; });
+            MOVABLE.forEach(function (k) { if (out.indexOf(k) === -1) { out.push(k); } });
+            return out;
+        }
+        function sequence() {
+            var mo = movableOrder(); var mi = 0; var seq = [];
+            DEFAULT_ORDER.forEach(function (k) {
+                if (FIXED[k]) { seq.push(k); } else { seq.push(mo[mi++]); }
+            });
+            return seq;
+        }
+        function reorderParent(parent, seq) {
+            if (!parent) { return; }
+            var byCol = {};
+            [].forEach.call(parent.children, function (n) {
+                var k = n.getAttribute && n.getAttribute("data-col");
+                if (k) { byCol[k] = n; }
+            });
+            seq.forEach(function (k) { if (byCol[k]) { parent.appendChild(byCol[k]); } });
+        }
+        function applyOrder() {
+            var seq = sequence();
+            reorderParent(colgroup, seq);
+            theadRows.forEach(function (tr) { reorderParent(tr, seq); });
+            if (tbody) {
+                [].forEach.call(tbody.querySelectorAll("tr"), function (tr) {
+                    if (tr.classList.contains("concilia-add") ||
+                        tr.classList.contains("salmon-empty")) { return; }
+                    if (tr.querySelector("td[data-col]")) { reorderParent(tr, seq); }
+                });
+            }
+        }
+
+        // ---------------- Anchos (solo resizable + colgroup) ------------- //
+        function defW(k) {
+            var col = colgroup && colgroup.querySelector('col[data-col="' + k + '"]');
+            var d = col && Number(col.getAttribute("data-w"));
+            return (isFinite(d) && d > 0) ? d : 120;
+        }
+        function widths() {
+            var saved = rj(LS_WIDTH) || {}; var out = {};
+            DEFAULT_ORDER.forEach(function (k) {
+                var w = Number(saved[k]);
+                out[k] = (isFinite(w) && w >= MIN_W) ? w : defW(k);
+            });
+            return out;
+        }
+        function applyWidths() {
+            if (!colgroup) { return; }
+            var W = widths(); var total = 0;
+            DEFAULT_ORDER.forEach(function (k) {
+                var w = W[k]; total += w;
+                var col = colgroup.querySelector('col[data-col="' + k + '"]');
+                if (col) { col.style.width = w + "px"; }
+                var th = headRow.querySelector('th[data-col="' + k + '"]');
+                if (th) { th.style.width = w + "px"; }
+            });
+            table.style.width = total + "px";
+        }
+        function syncTableWidth() {
+            if (!colgroup) { return; }
+            var total = 0;
+            [].forEach.call(colgroup.querySelectorAll("col[data-col]"), function (col) {
+                total += parseFloat(col.style.width) || 0;
+            });
+            if (total) { table.style.width = total + "px"; }
+        }
+
+        // ---------------- Ordenación cliente (▲▼) ------------------------ //
+        function getSort() { var s = rj(LS_SORT); return (s && s.col) ? s : null; }
+        function cellVal(tr, col, type) {
+            var td = tr.querySelector('td[data-col="' + col + '"]');
+            if (!td) { return type === "num" ? -Infinity : ""; }
+            var inp = td.querySelector("input");
+            var raw = inp ? inp.value : td.getAttribute("data-sort-value");
+            if (raw === null || raw === undefined) { raw = td.textContent || ""; }
+            if (type === "num") {
+                var n = parseFloat(String(raw).replace(",", "."));
+                return isFinite(n) ? n : -Infinity;
+            }
+            return String(raw).trim().toLowerCase();
+        }
+        function sortRows(col, dir) {
+            if (!tbody) { return; }
+            var th = headRow.querySelector('th[data-col="' + col + '"]');
+            var type = (th && th.getAttribute("data-sort-type") === "num") ? "num" : "text";
+            var rows = [].slice.call(tbody.querySelectorAll("tr")).filter(function (tr) {
+                return tr.querySelector("td[data-col]") &&
+                    !tr.classList.contains("salmon-empty") &&
+                    !tr.classList.contains("concilia-add");
+            });
+            rows.sort(function (a, b) {
+                var va = cellVal(a, col, type), vb = cellVal(b, col, type);
+                if (va < vb) { return dir === "asc" ? -1 : 1; }
+                if (va > vb) { return dir === "asc" ? 1 : -1; }
+                return 0;
+            });
+            rows.forEach(function (tr) { tbody.appendChild(tr); });
+        }
+        function applySortIndicator() {
+            [].forEach.call(headRow.querySelectorAll("th[data-col]"), function (th) {
+                th.classList.remove("sorted-asc", "sorted-desc");
+            });
+            var s = getSort(); if (!s) { return; }
+            var th = headRow.querySelector('th[data-col="' + s.col + '"]');
+            if (!th) { return; }
+            th.classList.add(s.dir === "asc" ? "sorted-asc" : "sorted-desc");
+            sortRows(s.col, s.dir);
+        }
+
+        // ---------------- Cableado de interacciones ---------------------- //
+        function wireResize() {
+            var rz = null;
+            headRow.addEventListener("mousedown", function (ev) {
+                var h = ev.target.closest ? ev.target.closest(".col-resizer") : null;
+                if (!h) { return; }
+                var th = h.closest("th[data-col]"); if (!th) { return; }
+                ev.preventDefault();
+                var k = th.getAttribute("data-col");
+                var col = colgroup.querySelector('col[data-col="' + k + '"]');
+                rz = { k: k, col: col, th: th, x: ev.clientX, w: th.getBoundingClientRect().width };
+                document.body.classList.add("col-resizing");
+            });
+            document.addEventListener("mousemove", function (ev) {
+                if (!rz) { return; }
+                var w = Math.max(MIN_W, Math.round(rz.w + (ev.clientX - rz.x)));
+                if (rz.col) { rz.col.style.width = w + "px"; }
+                rz.th.style.width = w + "px"; rz._w = w;
+                syncTableWidth();
+            });
+            document.addEventListener("mouseup", function () {
+                if (!rz) { return; }
+                if (rz._w) { var W = widths(); W[rz.k] = rz._w; wj(LS_WIDTH, W); }
+                rz = null; document.body.classList.remove("col-resizing");
+            });
+        }
+        function wireReorder() {
+            var dragKey = null;
+            function cleanup() {
+                dragKey = null;
+                [].forEach.call(headRow.querySelectorAll("th"), function (t) {
+                    t.classList.remove("col-dragging"); t.classList.remove("col-drop-target");
+                });
+            }
+            headRow.addEventListener("dragstart", function (ev) {
+                var th = ev.target.closest ? ev.target.closest("th[data-col]") : null;
+                if (!th) { return; }
+                if (FIXED[th.getAttribute("data-col")]) { ev.preventDefault(); return; }
+                if (ev.target.closest && ev.target.closest(".col-resizer")) { ev.preventDefault(); return; }
+                dragKey = th.getAttribute("data-col");
+                th.classList.add("col-dragging");
+                headRow._didDrag = false;
+                try { ev.dataTransfer.effectAllowed = "move"; ev.dataTransfer.setData("text/plain", dragKey); } catch (e) {}
+            });
+            headRow.addEventListener("dragover", function (ev) {
+                if (!dragKey) { return; }
+                ev.preventDefault();
+                try { ev.dataTransfer.dropEffect = "move"; } catch (e) {}
+                var th = ev.target.closest ? ev.target.closest("th[data-col]") : null;
+                [].forEach.call(headRow.querySelectorAll("th"), function (t) { t.classList.remove("col-drop-target"); });
+                if (th && !FIXED[th.getAttribute("data-col")] &&
+                    th.getAttribute("data-col") !== dragKey) { th.classList.add("col-drop-target"); }
+            });
+            headRow.addEventListener("drop", function (ev) {
+                if (!dragKey) { return; }
+                ev.preventDefault();
+                var th = ev.target.closest ? ev.target.closest("th[data-col]") : null;
+                if (th && !FIXED[th.getAttribute("data-col")]) {
+                    var target = th.getAttribute("data-col");
+                    if (target && target !== dragKey) {
+                        var mo = movableOrder();
+                        var from = mo.indexOf(dragKey), to = mo.indexOf(target);
+                        if (from !== -1 && to !== -1) {
+                            mo.splice(from, 1); mo.splice(to, 0, dragKey);
+                            wj(LS_ORDER, mo); applyOrder();
+                            if (resizable && colgroup) { applyWidths(); }
+                        }
+                    }
+                }
+                headRow._didDrag = true;
+                setTimeout(function () { headRow._didDrag = false; }, 0);
+                cleanup();
+            });
+            headRow.addEventListener("dragend", function () {
+                headRow._didDrag = true;
+                setTimeout(function () { headRow._didDrag = false; }, 0);
+                cleanup();
+            });
+        }
+        function wireSort() {
+            headRow.addEventListener("click", function (ev) {
+                if (ev.target.closest && ev.target.closest(".col-resizer")) { return; }
+                if (headRow._didDrag) { return; }
+                var th = ev.target.closest ? ev.target.closest("th[data-col]") : null;
+                if (!th) { return; }
+                var col = th.getAttribute("data-col");
+                var s = getSort(); var dir = "asc";
+                if (s && s.col === col) { dir = s.dir === "asc" ? "desc" : "asc"; }
+                wj(LS_SORT, { col: col, dir: dir });
+                applySortIndicator();
+            });
+        }
+
+        // ---------------- Arranque --------------------------------------- //
+        applyOrder();
+        if (resizable && colgroup) { applyWidths(); }
+        if (sortable) { applySortIndicator(); }
+        wireReorder();
+        if (resizable && colgroup) { wireResize(); }
+        if (sortable) { wireSort(); }
+
+        return {
+            reset: function () {
+                try {
+                    localStorage.removeItem(LS_ORDER);
+                    localStorage.removeItem(LS_WIDTH);
+                    localStorage.removeItem(LS_SORT);
+                } catch (e) {}
+                applyOrder();
+                if (resizable && colgroup) { applyWidths(); }
+                if (sortable) { applySortIndicator(); }
+            }
+        };
+    }
+
+    // Aplicar a las tablas con configuración: grid de líneas (detalle) y
+    // tabla de la bandeja (lista). Cada una recuerda su layout por separado.
+    var gridApi = enhanceTable(document.getElementById("lines-table"));
+    [].forEach.call(document.querySelectorAll('table[data-cols-store]'), function (t) {
+        if (t.id === "lines-table") { return; }
+        enhanceTable(t);
+    });
+
+    // Botón «↺ Columnas» del detalle: restablece el grid de líneas.
+    var resetBtn = document.getElementById("reset-cols-btn");
+    if (resetBtn && gridApi) {
+        resetBtn.addEventListener("click", function () { gridApi.reset(); });
+    }
+})();
+
+// ===================================================================== //
+//  TANDA 2B — Atajos de teclado del grid de líneas: F7 / F8.            //
+//    F7 = duplicar la línea salmón en foco (crea una «Nueva» con los     //
+//         mismos valores: POST standalone + PATCH campos).               //
+//    F8 = copiar a la celda en foco el valor de la celda de ARRIBA       //
+//         (misma columna, fila salmón anterior). Marca la fila como       //
+//         editada (no guarda hasta pulsar «Guardar»).                    //
+// ===================================================================== //
+(function () {
+    "use strict";
+    var table = document.getElementById("lines-table");
+    if (!table) { return; }
+    var tbody = table.querySelector("tbody");
+    if (!tbody) { return; }
+    var dataTag = document.getElementById("document-data");
+    if (!dataTag) { return; }
+    var documentId;
+    try { documentId = JSON.parse(dataTag.textContent).id; }
+    catch (e) { documentId = (dataTag.dataset && dataTag.dataset.documentId) || null; }
+    if (!documentId) { return; }
+
+    function parseNumEs(value) {
+        var s = String(value || "").trim();
+        if (!s) { return null; }
+        var n = parseFloat(s.replace(/\./g, function (m, off, str) {
+            return str.indexOf(",") !== -1 ? "" : m;
+        }).replace(",", "."));
+        return isNaN(n) ? null : n;
+    }
+
+    // Cuerpo para .../conciliacion/campos a partir de los inputs de la fila.
+    function camposBody(tr) {
+        var out = {
+            codigo_partida: null, descripcion: null, cantidad: null,
+            unidad: null, precio_unitario: null, descuento: null, codigo_externo: null
+        };
+        [].forEach.call(tr.querySelectorAll(".js-cedit"), function (inp) {
+            var f = inp.dataset.field;
+            if (!f || !(f in out)) { return; }
+            if (inp.dataset.numeric === "1") { out[f] = parseNumEs(inp.value); }
+            else { var t = (inp.value || "").trim(); out[f] = t || null; }
+        });
+        return out;
+    }
+
+    function duplicateRow(tr) {
+        var body = camposBody(tr);
+        fetch("/api/documents/" + documentId + "/lines/standalone",
+            { method: "POST", headers: { "Accept": "application/json" } })
+            .then(function (r) {
+                if (!r.ok) { throw new Error("standalone"); }
+                return r.json();
+            })
+            .then(function (j) {
+                var nid = j && j.valuation_line_id;
+                if (!nid) { window.location.reload(); return null; }
+                return fetch("/api/documents/" + documentId + "/lines/" + nid + "/conciliacion/campos",
+                    { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+            })
+            .then(function () { window.location.reload(); })
+            .catch(function () { window.alert("No se pudo duplicar la línea."); });
+    }
+
+    function prevSalmonRow(tr) {
+        var p = tr.previousElementSibling;
+        while (p && !(p.classList.contains("conciliacion-row") && p.querySelector("td[data-col]"))) {
+            p = p.previousElementSibling;
+        }
+        return p;
+    }
+
+    document.addEventListener("keydown", function (ev) {
+        var active = document.activeElement;
+        var inGridInput = active && active.classList &&
+            active.classList.contains("js-cedit") && table.contains(active);
+
+        if (ev.key === "F7") {
+            var tr = active && active.closest ? active.closest("tr.conciliacion-row") : null;
+            if (!tr || !table.contains(tr)) { return; }
+            ev.preventDefault();
+            if (!window.confirm(
+                "¿Duplicar esta línea salmón? Se creará una copia «Nueva» con " +
+                "los mismos valores (partida, concepto, cantidad, precio…)."
+            )) { return; }
+            duplicateRow(tr);
+        } else if (ev.key === "F8") {
+            if (!inGridInput) { return; }
+            var td = active.closest("td[data-col]");
+            var row = active.closest("tr.conciliacion-row");
+            if (!td || !row) { return; }
+            var col = td.getAttribute("data-col");
+            var prev = prevSalmonRow(row);
+            if (!prev) { return; }
+            var ptd = prev.querySelector('td[data-col="' + col + '"]');
+            if (!ptd) { return; }
+            var pinp = ptd.querySelector(".js-cedit");
+            var val = pinp ? pinp.value : ((ptd.getAttribute("data-sort-value") || "").trim());
+            ev.preventDefault();
+            active.value = val;
+            active.dispatchEvent(new Event("input", { bubbles: true }));
+            active.focus();
+        }
+    });
 })();

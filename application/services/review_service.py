@@ -22,6 +22,19 @@ class ReviewService:
     def list_documents(self, filters: DocumentListFilters) -> PaginatedDocuments:
         return self._repository.list_documents(filters)
 
+    def get_neighbor_ids(
+        self,
+        *,
+        document_id: str,
+        filters: DocumentListFilters,
+    ) -> tuple[str | None, str | None]:
+        """IDs del albaran anterior y siguiente segun el orden+filtros de
+        la bandeja (para los botones de navegacion del detalle)."""
+        return self._repository.get_neighbor_ids(
+            document_id=document_id,
+            filters=filters,
+        )
+
     def get_document(
         self,
         document_id: str,

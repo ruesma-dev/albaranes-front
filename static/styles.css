@@ -578,8 +578,11 @@ input[readonly].readonly-cell {
 /*  Bloque de CONTRATO en la cabecera del detalle                 */
 /* ============================================================== */
 .contrato-section {
+    margin-top: 24px;
     margin-bottom: 28px;
+    padding-top: 20px;
     padding-bottom: 20px;
+    border-top: 2px solid var(--line);
     border-bottom: 2px solid var(--line);
 }
 
@@ -1393,3 +1396,234 @@ button.concilia-badge.js-concilia-edit:hover {
 .filter-importe input[type="number"] { width: 64px; flex: 0 0 auto; text-align: right; }
 .papelera-ico { font-size: 1.3em; vertical-align: -0.12em; line-height: 1; }
 .filter-submit-hidden { position: absolute; left: -9999px; width: 1px; height: 1px; padding: 0; border: 0; }
+
+/* ===================================================================== */
+/*  Navegacion anterior/siguiente del detalle (jun 2026 — features 1/2)   */
+/* ===================================================================== */
+.detail-nav {
+    position: sticky;
+    bottom: 0;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-top: 18px;
+    padding: 10px 14px;
+    background: var(--paper, #ffffff);
+    border: 1px solid var(--line, rgba(123, 134, 140, 0.22));
+    border-radius: var(--radius-sm, 10px);
+    box-shadow: var(--shadow-md, 0 18px 40px -22px rgba(29, 32, 36, 0.35));
+    z-index: 20;
+}
+.detail-nav .detail-nav-back {
+    margin: 0 auto;
+    opacity: 0.85;
+}
+.detail-nav .detail-nav-prev { margin-right: auto; }
+.detail-nav .detail-nav-next { margin-left: auto; }
+.detail-nav .is-disabled {
+    opacity: 0.4;
+    pointer-events: none;
+    cursor: default;
+    box-shadow: none;
+}
+
+/* Campos de cabecera bloqueados: proveedor / obra solo se cambian con su
+   desplegable de busqueda (Sigrid). El input muestra el valor vigente, en
+   gris y no editable, para evitar ediciones a mano que descuadren el
+   enriquecimiento. */
+input.locked-field {
+    background: var(--canvas, #f3f4f5);
+    color: var(--ink-soft, #4a4f55);
+    cursor: not-allowed;
+    border-style: dashed;
+}
+input.locked-field:focus {
+    outline: none;
+    box-shadow: none;
+}
+
+
+/* ===================================================================== */
+/*  TANDA 2A — Líneas: blancas colapsables (lectura) + grid salmón.       */
+/* ===================================================================== */
+
+/* Bloque colapsable de líneas blancas (lo que leyó la IA), solo lectura. */
+.albaran-lines {
+    margin: 8px 0 14px;
+    border: 1px solid var(--line, rgba(123,134,140,0.22));
+    border-radius: var(--radius-sm, 10px);
+    background: var(--paper-soft, #fafbfb);
+}
+.albaran-lines > summary {
+    cursor: pointer;
+    padding: 9px 12px;
+    display: flex;
+    gap: 10px;
+    align-items: baseline;
+    list-style: none;
+}
+.albaran-lines > summary::-webkit-details-marker { display: none; }
+.albaran-lines > summary::before {
+    content: "▸";
+    color: var(--steel, #7b868c);
+    transition: transform 0.12s var(--ease, ease);
+}
+.albaran-lines[open] > summary::before { content: "▾"; }
+.albaran-lines > summary .al-summary-title { font-weight: 600; }
+.albaran-lines[open] > summary { border-bottom: 1px solid var(--line, rgba(123,134,140,0.22)); }
+.albaran-lines .table-scroll { margin: 0; padding: 0 8px 8px; }
+.albaran-lines-table th, .albaran-lines-table td { font-size: 0.84rem; }
+.albaran-lines-table .al-concepto {
+    max-width: 360px; white-space: normal;
+}
+.al-salmon-cell { text-align: center; }
+.al-salmon-cell .al-matched { color: var(--ok, #2d6a4f); font-weight: 700; }
+.add-concilia-btn {
+    font-size: 0.78rem;
+    padding: 2px 9px;
+    border-radius: 8px;
+    border: 1px solid var(--line-strong, rgba(123,134,140,0.4));
+    background: var(--paper, #fff);
+    cursor: pointer;
+    white-space: nowrap;
+}
+.add-concilia-btn:hover {
+    background: var(--brand-soft, #f7eaee);
+    border-color: var(--brand, #9f2842);
+    color: var(--brand-strong, #7a1e33);
+}
+
+/* Grid salmón: ancho fijo por columna, reordenable y redimensionable. */
+.salmon-scroll { overflow-x: auto; }
+.salmon-table { table-layout: fixed; width: max-content; min-width: 100%; }
+.salmon-table thead th.salmon-head,
+.salmon-table thead tr.salmon-head th {
+    position: relative;
+    user-select: none;
+    cursor: grab;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.salmon-table thead th.col-dragging { opacity: 0.45; cursor: grabbing; }
+.salmon-table thead th.col-drop-target { box-shadow: inset 3px 0 0 var(--brand, #9f2842); }
+.salmon-table .col-resizer {
+    position: absolute;
+    top: 0; right: 0;
+    width: 8px; height: 100%;
+    cursor: col-resize;
+    user-select: none;
+}
+.salmon-table .col-resizer:hover { background: var(--brand-soft, #f7eaee); }
+body.col-resizing, body.col-resizing * { cursor: col-resize !important; user-select: none; }
+.salmon-table td.concilia-td { overflow: hidden; }
+.salmon-table .cell-input { width: 100%; box-sizing: border-box; }
+.salmon-table .combo.combo-partida { width: 100%; }
+.salmon-table .salmon-empty td { color: var(--steel, #7b868c); }
+
+/* Botón fantasma (restablecer columnas). */
+.btn.ghost {
+    background: transparent;
+    border: 1px solid var(--line-strong, rgba(123,134,140,0.4));
+    color: var(--ink-soft, #4a4f55);
+    box-shadow: none;
+}
+.btn.ghost:hover { background: var(--paper-soft, #fafbfb); }
+
+/* ===================================================================== */
+/*  TANDA 2B — Formato TABLA del grid de líneas + ordenación (▲▼).        */
+/* ===================================================================== */
+
+/* Cabecera ROJA con texto BLANCO en el grid salmón. */
+.salmon-table thead th {
+    background: var(--brand, #9f2842);
+    color: #fff;
+    border: 1px solid var(--brand-strong, #7a1e33);
+    position: relative;
+    user-select: none;
+    cursor: grab;
+    white-space: nowrap;
+    vertical-align: middle;
+    padding: 7px 10px;
+    text-align: left;
+}
+.salmon-table thead th .th-label { font-weight: 700; }
+.salmon-table thead th .th-sub {
+    display: block;
+    font-weight: 400;
+    font-size: 0.66rem;
+    opacity: 0.82;
+    margin-top: 1px;
+    text-transform: none;
+    letter-spacing: 0;
+}
+.salmon-table thead th .th-sort { margin-left: 5px; font-size: 0.7rem; }
+.salmon-table thead th.sorted-asc .th-sort::after { content: "▲"; }
+.salmon-table thead th.sorted-desc .th-sort::after { content: "▼"; }
+.salmon-table thead th.col-dragging { opacity: 0.5; cursor: grabbing; }
+.salmon-table thead th.col-drop-target { box-shadow: inset 3px 0 0 #fff; }
+.salmon-table .col-resizer {
+    position: absolute; top: 0; right: 0; width: 8px; height: 100%;
+    cursor: col-resize; user-select: none;
+}
+.salmon-table .col-resizer:hover { background: rgba(255, 255, 255, 0.35); }
+
+/* Rejilla: bordes de celda + cebra. */
+.salmon-table td.concilia-td {
+    border: 1px solid var(--line, rgba(123, 134, 140, 0.25));
+    vertical-align: middle;
+    overflow: hidden;
+}
+.salmon-table tbody tr:nth-child(even) td.concilia-td { background: var(--paper-soft, #fafbfb); }
+.salmon-table tbody tr:hover td.concilia-td { background: var(--brand-soft, #f7eaee); }
+
+/* Celdas a UNA línea (texto no editable con elipsis). */
+.salmon-table .concilia-val,
+.salmon-table .concilia-price-ok,
+.salmon-table .concilia-price-warn {
+    display: inline-block;
+    max-width: 100%;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    vertical-align: bottom;
+}
+.salmon-table .cell-input { width: 100%; box-sizing: border-box; }
+.salmon-table .combo.combo-partida { width: 100%; }
+
+/* Origen: solo el badge. */
+.salmon-table td.td-origen { text-align: center; }
+
+/* Acciones: Borrar + Guardar a la DERECHA. */
+.salmon-table td.td-acciones { white-space: nowrap; text-align: right; }
+.salmon-table td.td-acciones .btn { margin-left: 4px; }
+
+/* Selector de línea de contrato OCULTO por defecto (concepto = 1 línea);
+   el ✎ de Origen lo abre/cierra. */
+.salmon-table .js-concilia-combo { display: none; }
+.salmon-table .js-concilia-combo.is-open { display: block; margin-top: 5px; }
+
+/* ---- Bandeja (lista): flechita de orden de servidor + reordenar ------ */
+.docs-table thead tr:first-child th { cursor: grab; user-select: none; position: relative; }
+.docs-table thead tr:first-child th.sticky-col { cursor: default; }
+.docs-table .sort-arrow { margin-left: 5px; font-size: 0.72rem; }
+.docs-table thead th.col-dragging { opacity: 0.5; cursor: grabbing; }
+.docs-table thead th.col-drop-target { box-shadow: inset 3px 0 0 var(--brand, #9f2842); }
+
+/* Combo de concepto (type-ahead sobre líneas de contrato): ocupa la celda. */
+.salmon-table .combo.combo-concepto { width: 100%; }
+
+/* Sub-fila de campos: agrupa varios campos en UNA sola línea dentro del
+   form-grid de cabecera (menos scroll). Colapsa a 1 columna en móvil. */
+.form-grid .form-subrow {
+    grid-column: 1 / -1;
+    display: grid;
+    gap: 16px;
+    align-items: end;
+}
+.form-grid .form-subrow.cols-3 { grid-template-columns: repeat(3, minmax(150px, 1fr)); }
+.form-grid .form-subrow.cols-2 { grid-template-columns: repeat(2, minmax(180px, 1fr)); }
+@media (max-width: 820px) {
+    .form-grid .form-subrow { grid-template-columns: 1fr; }
+}

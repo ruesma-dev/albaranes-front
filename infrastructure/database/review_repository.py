@@ -2944,7 +2944,22 @@ class AlbaranReviewRepository:
             # NO aqui. Asi conciliar o cambiar la linea de contrato nunca
             # pisa lo leido/escrito por el usuario.
             eff_codimp = line.codigo_imputacion
+            # La cantidad EDITABLE de la fila salmón vive en la LÍNEA DE
+            # VALORACIÓN (cantidad_albaran / cantidad_convertida): es la que
+            # el revisor edita y guarda en .../conciliacion/campos. Antes se
+            # mostraba line.cantidad (la BLANCA leída por la IA), de modo que
+            # editar la cantidad de la salmón no se reflejaba al recargar
+            # ("la cantidad no se guarda"). Preferimos la de la valoración
+            # cuando existe; si no, la blanca.
             eff_cantidad = line.cantidad
+            if v is not None:
+                _v_cant = (
+                    v.cantidad_convertida
+                    if v.cantidad_convertida is not None
+                    else v.cantidad_albaran
+                )
+                if _v_cant is not None:
+                    eff_cantidad = _v_cant
             eff_unidad = None
             # Regla general: la fila blanca muestra lo LEÍDO del albarán
             # (line.precio / line.precio_neto). PERO hay albaranes que NO
@@ -3273,6 +3288,43 @@ class AlbaranReviewRepository:
             document_url=AlbaranReviewRepository._document_url(row),
             lines=lines or [],
         )
+
+    # ------------------------------------------------------------------ #
+    # Navegacion anterior/siguiente (jun 2026).
+    #
+    # Devuelve los ids del documento ANTERIOR y SIGUIENTE segun EXACTAMENTE
+    # el mismo orden + filtros de la bandeja (``_apply_filters`` +
+    # ``_apply_sort``), ignorando la paginacion. Asi los botones del detalle
+    # recorren el conjunto filtrado completo (cruzando paginas) y casan con
+    # lo que el revisor vio en la lista.
+    #
+    # Carga solo la columna ``id`` del conjunto ordenado (cadenas de 36
+    # chars; el volumen de albaranes lo hace trivial) y localiza la posicion
+    # del documento actual. ``(None, None)`` si las tablas no estan listas o
+    # el documento no pertenece al conjunto filtrado (p. ej. se filtro por
+    # algo que el no cumple).
+    # ------------------------------------------------------------------ #
+    def get_neighbor_ids(
+        self,
+        *,
+        document_id: str,
+        filters: DocumentListFilters,
+    ) -> tuple[str | None, str | None]:
+        self.initialize()
+        if not self._tables_ready():
+            return (None, None)
+        with self._session_factory.create_session() as session:
+            stmt = select(AlbaranDocumentMergeOrm.id)
+            stmt = self._apply_filters(stmt=stmt, filters=filters)
+            stmt = self._apply_sort(stmt=stmt, filters=filters)
+            ids = list(session.scalars(stmt).all())
+        try:
+            pos = ids.index(document_id)
+        except ValueError:
+            return (None, None)
+        prev_id = ids[pos - 1] if pos > 0 else None
+        next_id = ids[pos + 1] if pos < len(ids) - 1 else None
+        return (prev_id, next_id)
 
     @staticmethod
     def _apply_filters(*, stmt: Any, filters: DocumentListFilters) -> Any:
