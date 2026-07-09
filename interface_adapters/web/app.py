@@ -39,6 +39,12 @@ from infrastructure.graph.token_provider import GraphTokenProvider
 from infrastructure.colas.colas_orchestrator_client import ColasOrchestratorClient
 from infrastructure.colas.colas_refetch_client import ColasRefetchClient
 from infrastructure.sigrid.sigrid_lookup_client import SigridLookupClient
+from infrastructure.sigrid.sigrid_api_contrato_client import (
+    SigridApiContratoClient,
+)
+from infrastructure.sigrid.local_refetch_client import (
+    LocalContratoRefetchClient,
+)
 from ruesma_comun.colas import construir_publicador
 from ruesma_comun.colas.arranque import ConfiguracionColasAusenteError
 from ruesma_comun.colas.publicador import PublicadorBestEffort
@@ -282,6 +288,38 @@ def build_app(settings: Settings) -> FastAPI:
     sv3_refetch_client: ContratoRefetchClient = ColasRefetchClient(
         publicador=publicador,
     )
+    # ------------------------------------------------------------------ #
+    # FALLBACK solo-front (jun 2026): si NO hay colas (publicador NULO)
+    # pero SÍ hay credenciales Sigrid, el re-fetch de contratos se hace
+    # LOCAL y SÍNCRONO (Sigrid directo → persiste contratos+líneas en
+    # BBDD), para poder ASOCIAR contratos sin sv3 ni Azurite. Así, al
+    # elegir un contrato encontrado en vivo, queda cacheado y el PUT ya
+    # no anula la selección (se acaba el 409 "sin contrato"). OJO: esto
+    # NO lanza la valoración — el orquestador también va por cola; en
+    # solo-front el /valuate informará de que no se encoló. En producción
+    # (con COLAS_*) se mantiene el ColasRefetchClient (asíncrono → sv3).
+    # ------------------------------------------------------------------ #
+    if isinstance(publicador, _PublicadorColasNulo) and settings.sigrid_lookup_enabled:
+        try:
+            _contrato_client = SigridApiContratoClient(
+                base_url=settings.sigrid_api_base_url,
+                function_key=settings.sigrid_api_function_key,
+                database=settings.sigrid_api_database,
+                timeout_s=settings.sigrid_api_timeout_s,
+            )
+            sv3_refetch_client = LocalContratoRefetchClient(
+                sigrid_client=_contrato_client,
+                repository=repository,
+            )
+            logger.info(
+                "[contrato-refetch][wiring] FALLBACK LOCAL activado "
+                "(solo-front + Sigrid): re-fetch síncrono sin sv3."
+            )
+        except Exception:
+            logger.exception(
+                "[contrato-refetch][wiring] no se pudo activar el fallback "
+                "local; se mantiene el de cola (no operativo en solo-front)."
+            )
     app.state.sv3_refetch_client = sv3_refetch_client
 
     # Orquestador (antes HttpOrchestratorClient → sv7, disuelto). Ahora:

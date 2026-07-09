@@ -372,10 +372,10 @@
                        selección (PUT sin redirigir) y luego dispara la valoración,
                        así no hace falta pulsar "Guardar" aparte. Solo se pinta si
                        hay al menos un contrato y la vista es editable. #}
-                    {% if document.is_editable and document.contratos|length >= 1 %}
+                    {% if document.is_editable %}
                         <div class="valuate-row">
                             <button type="button"
-                                    class="btn primary"
+                                    class="btn brand"
                                     id="valuate-btn"
                                     data-current-val-id="{{ valuation.valuation_id if valuation else '' }}"
                                     data-current-val-ts="{{ valuation.created_at_utc if valuation else '' }}"

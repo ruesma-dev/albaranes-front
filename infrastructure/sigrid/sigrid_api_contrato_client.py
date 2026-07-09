@@ -12,7 +12,6 @@ from domain.models.contrato_sigrid_models import (
     ContratoFromSigrid,
     ContratoLineFromSigrid,
 )
-from domain.ports.contrato_refetch_port import ContratoPdfPayload
 
 logger = logging.getLogger(__name__)
 
@@ -168,75 +167,6 @@ class SigridApiContratoClient:
                 )
             )
         return enriched
-
-    def download_contrato_pdf(
-        self,
-        *,
-        gra_rep_ide: int,
-    ) -> ContratoPdfPayload | None:
-        url = f"{self._base_url}/api/documents/read"
-        payload = {
-            "database": self._database_rep,
-            "schema": "dbo",
-            "table": "gra",
-            "id_column": "ide",
-            "id_value": int(gra_rep_ide),
-            "blob_column": "ima",
-            "filename_columns": ["nomori", "nom"],
-            "disposition": "attachment",
-        }
-        headers = {
-            "x-functions-key": self._function_key,
-            "Content-Type": "application/json",
-        }
-
-        logger.info(
-            "%s DOWNLOAD REQUEST gra_rep_ide=%s",
-            _LOG_PREFIX,
-            gra_rep_ide,
-        )
-
-        try:
-            with httpx.Client(timeout=self._pdf_timeout_s) as client:
-                response = client.post(url, json=payload, headers=headers)
-        except Exception as exc:
-            logger.exception(
-                "%s DOWNLOAD FALLO transporte gra_rep_ide=%s exc=%r",
-                _LOG_PREFIX,
-                gra_rep_ide,
-                exc,
-            )
-            raise
-
-        status = response.status_code
-        content = response.content or b""
-        content_type = response.headers.get("Content-Type", "") or None
-        filename_header = response.headers.get("X-Document-Filename", "") or ""
-
-        logger.info(
-            "%s DOWNLOAD RESPONSE status=%s bytes=%s filename=%r",
-            _LOG_PREFIX,
-            status,
-            len(content),
-            filename_header,
-        )
-
-        if status == 404:
-            return None
-        if status >= 400:
-            preview = content[:300].decode("utf-8", errors="replace")
-            raise RuntimeError(
-                f"sigrid-api /documents/read respondió {status}: {preview}"
-            )
-        if not content:
-            return None
-
-        filename = filename_header.strip() or f"contrato_{gra_rep_ide}.pdf"
-        return ContratoPdfPayload(
-            filename=filename,
-            content=content,
-            content_type=content_type,
-        )
 
     def _post_sql_read(
         self,

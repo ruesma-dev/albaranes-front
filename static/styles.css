@@ -1627,3 +1627,12 @@ body.col-resizing, body.col-resizing * { cursor: col-resize !important; user-sel
 @media (max-width: 820px) {
     .form-grid .form-subrow { grid-template-columns: 1fr; }
 }
+
+/* Botón de valoración: rojo Ruesma (marca). */
+.btn.brand {
+    background: var(--brand, #9f2842);
+    color: #fff;
+    border: 1px solid var(--brand-strong, #7a1e33);
+}
+.btn.brand:hover { background: var(--brand-strong, #7a1e33); }
+.btn.brand:disabled { opacity: 0.5; cursor: not-allowed; }

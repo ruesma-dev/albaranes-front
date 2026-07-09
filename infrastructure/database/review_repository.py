@@ -2187,19 +2187,114 @@ class AlbaranReviewRepository:
                 return None, None
             return document.proveedor_cif, document.obra_codigo
 
+    def replace_contratos_and_select(
+        self,
+        *,
+        document_id: str,
+        contratos: "list",
+    ) -> str | None:
+        """Reemplaza los contratos del documento (delete + insert de
+        cabecera y líneas) y devuelve el código auto-seleccionado.
+
+        Re-añadido (jun 2026) SOLO para el fallback LOCAL síncrono de
+        solo-front (``LocalContratoRefetchClient``): permite asociar
+        contratos sin sv3/colas. En producción el dueño de estas tablas
+        sigue siendo el sv3 (UPSERT por sigrid_ide); este método NO se
+        cablea cuando hay colas.
+
+        Auto-selección:
+          * exactamente 1 contrato → ese código.
+          * 0 o varios → conserva la selección previa si sigue presente
+            en la nueva lista; si no, ``None``.
+
+        El borrado de cada contrato arrastra sus líneas por el
+        ``ondelete=CASCADE`` de la FK a nivel de BBDD.
+        """
+        self.initialize()
+        now = self._utc_iso()
+        with self._session_factory.create_session() as session:
+            document = session.get(AlbaranDocumentMergeOrm, document_id)
+            if document is None:
+                raise KeyError(f"Documento no encontrado: {document_id}")
+
+            session.execute(
+                delete(AlbaranContratoMergeOrm).where(
+                    AlbaranContratoMergeOrm.document_id == document_id
+                )
+            )
+
+            codes: list[str] = []
+            for c in contratos:
+                contrato_orm = AlbaranContratoMergeOrm(
+                    document_id=document_id,
+                    codigo_contrato=c.codigo_contrato,
+                    nombre_contrato=c.nombre_contrato,
+                    fecha_alta_contrato=c.fecha_alta_contrato,
+                    fecha_contrato=c.fecha_contrato,
+                    vigencia_desde=c.vigencia_desde,
+                    vigencia_hasta=c.vigencia_hasta,
+                    importe_total=c.importe_total,
+                    cif_proveedor=c.cif_proveedor,
+                    nombre_proveedor=c.nombre_proveedor,
+                    codigo_obra=c.codigo_obra,
+                    nombre_obra=c.nombre_obra,
+                    gra_rep_ide=c.gra_rep_ide,
+                    pdf_sharepoint_relative_path=c.pdf_sharepoint_relative_path,
+                    pdf_sharepoint_web_url=c.pdf_sharepoint_web_url,
+                    fetched_at_utc=now,
+                )
+                session.add(contrato_orm)
+                session.flush()  # necesitamos contrato_orm.id para las líneas
+                codes.append(c.codigo_contrato)
+
+                for ln in (c.lines or []):
+                    session.add(
+                        AlbaranContratoLineMergeOrm(
+                            contrato_id=contrato_orm.id,
+                            codigo_contrato=c.codigo_contrato,
+                            linea=ln.linea,
+                            numero_linea=ln.numero_linea,
+                            codigo_producto=ln.codigo_producto,
+                            codigo_alternativo=ln.codigo_alternativo,
+                            unidad_medida=ln.unidad_medida,
+                            descripcion_linea=ln.descripcion_linea,
+                            uds=ln.uds,
+                            cantidad_servida=ln.cantidad_servida,
+                            cantidad_facturada=ln.cantidad_facturada,
+                            pendiente_servir=ln.pendiente_servir,
+                            precio_unitario=ln.precio_unitario,
+                            precio_bruto=ln.precio_bruto,
+                            descuentos=ln.descuentos,
+                            importe_linea=ln.importe_linea,
+                            cuota_iva=ln.cuota_iva,
+                            doc_origen=ln.doc_origen,
+                            codigo_partida=ln.codigo_partida,
+                            descripcion_partida=ln.descripcion_partida,
+                            fetched_at_utc=now,
+                        )
+                    )
+
+            if len(contratos) == 1:
+                selected = contratos[0].codigo_contrato
+            else:
+                prev = document.selected_contrato_codigo
+                selected = prev if (prev and prev in codes) else None
+
+            document.selected_contrato_codigo = selected
+            document.last_modified_at_utc = now
+            session.commit()
+            return selected
+
     # ---------------------------------------------------------------- #
-    # NOTA REFACTOR (mayo 2026): se eliminaron de aquí 3 métodos
-    # obsoletos que pertenecían al wiring antiguo (cuando el sv4
-    # llamaba a Sigrid directamente):
+    # NOTA REFACTOR (mayo 2026): se eliminaron de aquí 2 métodos
+    # obsoletos del wiring antiguo (PDF de contrato vía sv4):
     #
     #   * get_existing_pdf_paths
-    #   * replace_contratos_and_select
     #   * update_contrato_pdf_paths
     #
-    # Esa responsabilidad ahora vive ÍNTEGRAMENTE en el sv3, que
-    # es el dueño de las tablas albaran_contratos_merge y
-    # albaran_contrato_lines_merge (con UPSERT por sigrid_ide).
-    # El sv4 solo LEE esas tablas para pintar el portal.
+    # El PDF de contrato es responsabilidad del sv3. ``replace_contratos
+    # _and_select`` se RE-AÑADIÓ arriba (jun 2026) solo para el fallback
+    # local de solo-front, SIN lógica de PDF.
     # ---------------------------------------------------------------- #
 
     def update_document(

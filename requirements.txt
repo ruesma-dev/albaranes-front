@@ -6,9 +6,7 @@ python-multipart>=0.0.9
 jinja2>=3.1
 pydantic>=2.7
 pydantic-settings>=2.2
+python-dotenv>=1.0
 httpx>=0.27
 sqlalchemy>=2.0.30
 psycopg[binary]>=3.1
-# Carga del .env a os.environ en arranque local (main.py). En la nube no
-# hay .env (lo excluye .dockerignore) y load_dotenv() es no-op.
-python-dotenv>=1.0

@@ -846,6 +846,7 @@
         return (CONTRATO_LINES || []).map(function (l) {
             const lab = l.label || l.desc || "";
             return {
+                id: (l.id != null ? l.id : null),
                 label: lab,
                 desc: (l.desc != null ? l.desc : ""),
                 part: (l.part != null ? l.part : ""),
@@ -901,9 +902,22 @@
         function pick(it) {
             justPicked = true;
             const tr = input.closest("tr.conciliacion-row");
+            // Auto-guardado: re-conciliar con la línea de contrato elegida
+            // reutilizando el <select> oculto js-concilia-select (PATCH
+            // mode=contract_line: rellena partida/concepto/unidad/precio
+            // desde Sigrid, conserva la cantidad, deja la fila SIGRID y
+            // recarga). Sin pulsar «Guardar».
+            const sel = tr ? tr.querySelector(".js-concilia-select") : null;
+            if (sel && it.id != null) {
+                sel.value = String(it.id);
+                if (sel.value === String(it.id)) {
+                    close();
+                    sel.dispatchEvent(new Event("change", { bubbles: true }));
+                    return;
+                }
+            }
+            // Fallback (sin <select>/opción): rellenar campos en cliente.
             if (tr) {
-                // RELLENA los 4 campos desde la línea de contrato elegida.
-                // precio el ÚLTIMO para que el importe se recalcule con él.
                 _setRowField(tr, "codigo_partida", it.part);
                 _setRowField(tr, "descripcion", it.desc);
                 _setRowField(tr, "unidad", it.unidad);
@@ -1437,6 +1451,10 @@
             input.value = it.label;
             combo.dataset.label = it.label;
             close();
+            // Auto-guardado: al elegir obra/proveedor de Sigrid, persistir
+            // de inmediato (PUT) sin pulsar «Guardar». sendSave navega a la
+            // URL de retorno (recarga el detalle ya guardado).
+            if (typeof sendSave === "function") { sendSave(false); }
         }
         async function ensureLoaded(silent) {
             const key = obraInputId ? (currentObra() || "_") : "_";
@@ -1789,6 +1807,8 @@
         }
 
         valuateBtn.disabled = true;
+        const _valuateTxt = valuateBtn.textContent;
+        valuateBtn.textContent = "Valorando…";
         paintValuateStatus(
             "loading",
             "Guardando selección y lanzando valoración…"
@@ -1856,6 +1876,7 @@
             // selected_at_utc distinto → sv7 lo trata como una nueva
             // revaluación legítima).
             valuateBtn.disabled = false;
+            valuateBtn.textContent = _valuateTxt;
         }
     }
 
@@ -2106,14 +2127,19 @@
             }
         }
         async function cacheContratosEnSigrid() {
-            // Re-fetch en sv3: consulta Sigrid por la cif+obra YA guardadas y
-            // cachea contratos + líneas (necesario para poder valorar).
+            // Re-fetch: consulta Sigrid por la cif+obra YA guardadas y cachea
+            // contratos + líneas. En solo-front lo hace el fallback LOCAL
+            // (síncrono); en producción, sv3 vía cola. Devuelve el outcome
+            // {status, count, selected_contrato_codigo, message} o null si
+            // la llamada falla.
             try {
-                await fetch(
+                const r = await fetch(
                     `/api/documents/${documentId}/re-fetch-contratos`,
                     { method: "POST", headers: { "Content-Type": "application/json" } }
                 );
-            } catch (_) { /* best-effort: si falla, triggerValuate avisará */ }
+                if (!r.ok) return null;
+                return await r.json();
+            } catch (_) { return null; }
         }
 
         async function onPick(codigo) {
@@ -2143,7 +2169,20 @@
             status("loading", "Contrato seleccionado. Trayendo de Sigrid y valorando\u2026");
             try {
                 await persistSelection();          // 1) guarda obra/cif/selected
-                await cacheContratosEnSigrid();     // 2) re-fetch: cachea líneas
+                const rf = await cacheContratosEnSigrid();  // 2) cachea contrato+líneas
+                // Si el re-fetch NO logró cachear el contrato (Sigrid caído,
+                // 0 resultados, o sin cola NI fallback local), avisamos claro
+                // y NO valoramos: así evitamos el 409 "sin contrato".
+                if (rf && (rf.status === "sigrid_error"
+                        || rf.status === "no_results"
+                        || rf.count === 0)) {
+                    status("error",
+                        "No se pudo asociar el contrato: "
+                        + (rf.message || "el re-fetch no encontró/cacheó el contrato.")
+                        + " (revisa colas/sv3 o credenciales Sigrid).");
+                    if (valuateBtn) valuateBtn.disabled = true;
+                    return;
+                }
                 hidden.value = real;                // 3) re-asegura la selección
                 await triggerValuate();             //    guarda + valora + recarga
             } catch (exc) {
@@ -2168,9 +2207,15 @@
         let codigo = "";
         try { codigo = collectSelectedContratoCodigo() || ""; } catch (_) {}
         if (!codigo) return;             // sin contrato: no se espera valoracion
+        // Valoración en curso al cargar: el botón rojo queda DESACTIVADO
+        // hasta que termine y la página se refresque sola.
+        if (valuateBtn) {
+            valuateBtn.disabled = true;
+            valuateBtn.textContent = "Valorando…";
+        }
         paintValuateStatus(
             "loading",
-            "Valoracion inicial en curso… la pagina se actualizara al terminar."
+            "Valoracion en curso… la pagina se actualizara al terminar."
         );
         // baseline vacio: cualquier valoracion que aparezca dispara el refresco.
         pollUntilValued("", "");
