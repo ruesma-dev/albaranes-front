@@ -6,7 +6,8 @@ métodos, misma filosofía best-effort: el dato fundamental ya está en
 BBDD antes de notificar; la publicación/limpieza es solo el disparador.
 
 Mapeo de eventos:
-  - contract-selected → ``MensajeValoracion(force=True)`` → q-valoracion.
+  - contract-selected → ``MensajePersistencia(force=True)`` → q-persistencia
+    (sv3 re-enriquece el merge: PDF/MD del contrato + valoracion).
   - document-approved → ``MensajeFeedback`` → q-feedback.
   - document-purged   → limpieza directa de ``workflow_runs`` (BBDD), que
     desbloquea el dedup por contenido tras un hard-delete.
@@ -25,8 +26,16 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from ruesma_comun.colas import COLA_FEEDBACK, COLA_VALORACION
-from ruesma_comun.colas.mensajes import MensajeFeedback, MensajeValoracion
+from ruesma_comun.colas import (
+    COLA_FEEDBACK,
+    COLA_PERSISTENCIA,
+    COLA_VALORACION,
+)
+from ruesma_comun.colas.mensajes import (
+    MensajeFeedback,
+    MensajePersistencia,
+    MensajeValoracion,
+)
 from ruesma_comun.colas.publicador import PublicadorBestEffort
 
 from domain.ports.orchestrator_port import OrchestratorClient
@@ -60,19 +69,22 @@ class ColasOrchestratorClient(OrchestratorClient):
         selected_by: str | None,
         selected_at_utc: str,
     ) -> dict[str, Any] | None:
-        mensaje = MensajeValoracion(
-            document_id=document_id,
-            codigo_contrato=codigo_contrato,
-            force=True,
-        )
-        publicado = self._pub.publicar(self._cola_valoracion, mensaje)
+        # Al SELECCIONAR contrato hay que pasar por sv3 (q-persistencia):
+        # con VARIOS contratos, solo sv3 descarga el PDF/MD del elegido y
+        # encadena la valoracion. Se publica el MERGE id: el worker de sv3
+        # detecta que no hay blob con ese id y ejecuta el re-enrichment
+        # del merge (reenrich_by_merge_id), que baja el PDF del contrato
+        # seleccionado y dispara q-valoracion.
+        mensaje = MensajePersistencia(document_id=document_id, force=True)
+        publicado = self._pub.publicar(COLA_PERSISTENCIA, mensaje)
         if not publicado:
             return None
         return {
             "action": "queued",
             "detail": (
-                f"publicado en {self._cola_valoracion} "
-                f"(contrato={codigo_contrato}, force=True)"
+                f"publicado en {COLA_PERSISTENCIA} (contrato="
+                f"{codigo_contrato}, force=True): sv3 baja PDF/MD del "
+                f"contrato y encadena la valoracion."
             ),
             "previous_state": None,
             "new_state": "valuing",

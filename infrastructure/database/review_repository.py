@@ -135,6 +135,7 @@ class AlbaranReviewRepository:
             "ALTER TABLE albaran_documents_merge ADD COLUMN IF NOT EXISTS last_modified_at_utc VARCHAR(64)",
             "ALTER TABLE albaran_documents_merge ADD COLUMN IF NOT EXISTS review_notes TEXT",
             "ALTER TABLE albaran_documents_merge ADD COLUMN IF NOT EXISTS selected_contrato_codigo VARCHAR(64)",
+            "ALTER TABLE albaran_documents_merge ADD COLUMN IF NOT EXISTS selected_contrato_origen VARCHAR(32)",
             # Soft-delete (jun 2026). Defensa idempotente: normalmente las crea
             # sv3 (dueño del schema), pero si sv4 arranca primero en local, las
             # añadimos aquí para poder borrar/restaurar sin esperar a sv3. El
@@ -468,6 +469,9 @@ class AlbaranReviewRepository:
             )
 
         confianza = compute_confianza_pct(
+            selected_contrato_origen=getattr(
+                merge_doc, "selected_contrato_origen", None
+            ),
             obra_codigo=merge_doc.obra_codigo,
             obra_codigo_origen=getattr(merge_doc, "obra_codigo_origen", None),
             proveedor_cif=merge_doc.proveedor_cif,

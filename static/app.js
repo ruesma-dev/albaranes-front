@@ -2170,12 +2170,32 @@
             try {
                 await persistSelection();          // 1) guarda obra/cif/selected
                 const rf = await cacheContratosEnSigrid();  // 2) cachea contrato+líneas
-                // Si el re-fetch NO logró cachear el contrato (Sigrid caído,
-                // 0 resultados, o sin cola NI fallback local), avisamos claro
-                // y NO valoramos: así evitamos el 409 "sin contrato".
+                // Camino ASÍNCRONO (colas): sv3 recibió el encargo, bajará
+                // el PDF/MD del contrato y ENCADENARÁ la valoración él
+                // mismo. NO es un error (aunque count venga a 0: aún no ha
+                // terminado). Sondeamos hasta que aparezca la valoración.
+                if (rf && rf.status === "queued") {
+                    status("loading",
+                        "Contrato guardado \u2713 Trayendo el contrato de "
+                        + "Sigrid y preparando la valoraci\u00f3n\u2026 esta "
+                        + "p\u00e1gina se actualizar\u00e1 sola al terminar "
+                        + "(no hace falta refrescar).");
+                    if (valuateBtn) valuateBtn.disabled = true;
+                    const baseId = (valuateBtn && valuateBtn.dataset.currentValId) || "";
+                    const baseTs = (valuateBtn && valuateBtn.dataset.currentValTs) || "";
+                    pollUntilValued(baseId, baseTs);
+                    return;
+                }
+                // Fallo REAL del re-fetch (Sigrid caído, 0 resultados, o sin
+                // cola NI fallback local): avisamos claro y NO valoramos
+                // (así evitamos el 409 "sin contrato").
+                // OJO: NO usar `rf.count === 0` como señal de error. Con el
+                // flujo por colas la respuesta llega ANTES de que sv3
+                // procese, así que count viene SIEMPRE a 0 aunque todo vaya
+                // bien (el caso "queued" ya hizo return arriba). Solo son
+                // fallo real los estados explícitos.
                 if (rf && (rf.status === "sigrid_error"
-                        || rf.status === "no_results"
-                        || rf.count === 0)) {
+                        || rf.status === "no_results")) {
                     status("error",
                         "No se pudo asociar el contrato: "
                         + (rf.message || "el re-fetch no encontró/cacheó el contrato.")
@@ -2399,7 +2419,9 @@
         // Re-fetch asíncrono (colas): arranca el sondeo y sale.
         if (outcome && outcome.status === "queued") {
             setButtonsDisabled(true);
-            paintStatus("info", outcome.message || "Re-búsqueda encolada\u2026");
+            paintStatus("info",
+                "B\u00fasqueda de contratos en curso\u2026 esta secci\u00f3n "
+                + "se actualizar\u00e1 sola en unos segundos.");
             fetch(
                 `/api/documents/${documentId}`,
                 { headers: { "Accept": "application/json" } }

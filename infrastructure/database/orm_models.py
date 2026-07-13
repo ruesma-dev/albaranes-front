@@ -39,6 +39,12 @@ class AlbaranDocumentMergeOrm(Base):
     # Código del contrato elegido para este albarán (ref. soft, no FK).
     # NULL = sin elegir (0 contratos encontrados, o >1 sin elegir aún).
     selected_contrato_codigo: Mapped[str | None] = mapped_column(String(64))
+    # Origen de la seleccion del contrato (sv3): 'auto_unico' |
+    # 'auto_multiple' (selector deterministico entre varios candidatos;
+    # PENALIZA la confianza) | 'manual' | NULL.
+    selected_contrato_origen: Mapped[str | None] = mapped_column(
+        String(32)
+    )
 
     sharepoint_relative_path: Mapped[str | None] = mapped_column(String(1024))
     sharepoint_web_url: Mapped[str | None] = mapped_column(String(1024))

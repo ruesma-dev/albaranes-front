@@ -132,6 +132,13 @@ def _line_score(c: Any) -> float:
     )
 
 
+# Penalizacion cuando el CONTRATO fue elegido automaticamente entre
+# VARIOS candidatos (selector deterministico de sv3, origen
+# 'auto_multiple'). La eleccion es razonada (familia/palabras) pero no
+# esta verificada por un humano -> el documento entero merece revision.
+PENALIZACION_CONTRATO_AUTO_MULTIPLE = 15.0
+
+
 def compute_confianza_pct(
     *,
     obra_codigo: Any,
@@ -139,6 +146,7 @@ def compute_confianza_pct(
     proveedor_cif: Any,
     proveedor_cif_origen: Any,
     conciliaciones: Sequence[Any],
+    selected_contrato_origen: Any = None,
 ) -> float | None:
     """Confianza 0..100. ``None`` si no hay líneas (sin valoración útil).
 
@@ -156,4 +164,10 @@ def compute_confianza_pct(
     scores = [_line_score(c) for c in conciliaciones]
     lineas = (sum(scores) / len(scores)) * PESO_LINEAS
 
-    return round(cabecera + lineas, 1)
+    total = cabecera + lineas
+    if str(selected_contrato_origen or "").strip().lower() == (
+        "auto_multiple"
+    ):
+        total -= PENALIZACION_CONTRATO_AUTO_MULTIPLE
+
+    return round(max(total, 0.0), 1)
