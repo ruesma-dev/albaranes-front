@@ -11,6 +11,8 @@ Escala 0..100, dos bloques (pesos acordados):
   - Cabecera (30): Obra (15) + Proveedor/CIF (15). Por campo:
       manual / ia        -> 100 % del peso  (dato fiable / verificado)
       deterministic      ->  60 % del peso  (match por texto, umbral 0.5)
+      det_familia_obra   ->  50 % del peso  (CIF deducido por familia de
+                             producto entre los proveedores de la obra)
       ausente (NULL/"")  ->   0 %
 
   - Líneas (70): media SIMPLE del score por línea base (from_albaran),
@@ -47,6 +49,11 @@ PESO_LINEAS = 70.0
 
 # Factor para cabecera resuelta por texto determinista (vs ia/manual).
 FACTOR_DETERMINISTIC = 0.6
+# Factor cuando el CIF se dedujo por FAMILIA de producto entre los
+# proveedores con contrato en la obra (jul 2026, origen
+# 'det_familia_obra' del HeaderResolver de sv3): senal razonada pero el
+# nombre leido NO supero el umbral -> menos fiable que 'deterministic'.
+FACTOR_DET_FAMILIA_OBRA = 0.5
 
 # Sub-pesos del score por línea.
 W_CASADO = 0.50
@@ -70,6 +77,8 @@ def _header_field_pts(value: Any, origen: Any, full_pts: float) -> float:
     o = (origen or "").strip().lower() if isinstance(origen, str) else ""
     if o == "deterministic":
         return full_pts * FACTOR_DETERMINISTIC
+    if o == "det_familia_obra":
+        return full_pts * FACTOR_DET_FAMILIA_OBRA
     # 'ia', 'manual' o presente sin marca -> dato fiable.
     return full_pts
 

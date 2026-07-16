@@ -562,6 +562,9 @@ def build_app(settings: Settings) -> FastAPI:
         proveedor: str | None = Query(default=None),
         fecha: str | None = Query(default=None),
         obra: str | None = Query(default=None),
+        # Filtros EXACTOS de las vistas Obra/Proveedor (jul 2026).
+        obra_codigo: str | None = Query(default=None),
+        proveedor_cif: str | None = Query(default=None),
         albaran: str | None = Query(default=None),
         contrato: str | None = Query(default=None),
         lineas: str | None = Query(default=None),
@@ -587,6 +590,8 @@ def build_app(settings: Settings) -> FastAPI:
             proveedor=proveedor,
             fecha=fecha,
             obra=obra,
+            obra_codigo=obra_codigo,
+            proveedor_cif=proveedor_cif,
             albaran=albaran,
             contrato=contrato,
             lineas=lineas,
@@ -632,6 +637,45 @@ def build_app(settings: Settings) -> FastAPI:
             request=request,
             name="documents_list.html",
             context=context,
+        )
+
+    # ---------------------------------------------------------------- #
+    # Vistas agregadas (jul 2026): Obras y Proveedores. Cada fila enlaza
+    # a la bandeja YA filtrada (filtros exactos obra_codigo /
+    # proveedor_cif); el detalle del albaran es el mismo de siempre.
+    # ---------------------------------------------------------------- #
+    @app.get("/obras", response_class=HTMLResponse)
+    def obras_list(
+        request: Request,
+        search: str | None = Query(default=None),
+    ) -> HTMLResponse:
+        items = review_service.list_obras_resumen(search=search)
+        return templates.TemplateResponse(
+            request=request,
+            name="obras_list.html",
+            context={
+                "request": request,
+                "title": settings.app_title,
+                "items": items,
+                "search": (search or "").strip(),
+            },
+        )
+
+    @app.get("/proveedores", response_class=HTMLResponse)
+    def proveedores_list(
+        request: Request,
+        search: str | None = Query(default=None),
+    ) -> HTMLResponse:
+        items = review_service.list_proveedores_resumen(search=search)
+        return templates.TemplateResponse(
+            request=request,
+            name="proveedores_list.html",
+            context={
+                "request": request,
+                "title": settings.app_title,
+                "items": items,
+                "search": (search or "").strip(),
+            },
         )
 
     @app.post("/documents/{document_id}/approve", include_in_schema=False)
@@ -707,6 +751,60 @@ def build_app(settings: Settings) -> FastAPI:
                 status_code=303,
             )
         return RedirectResponse(url=f"/documents?{message}", status_code=303)
+
+    # ------------------------------------------------------------------ #
+    # Vaciar papelera (jul 2026): purga TODOS los albaranes borrados.
+    # Reutiliza hard_delete_document por documento (y su limpieza de
+    # dedup vía orquestador), en vez de un DELETE masivo que duplicaría
+    # el plan de borrado hijos→padres del repositorio.
+    # ------------------------------------------------------------------ #
+    @app.post("/documents/trash/empty", include_in_schema=False)
+    def empty_trash(request: Request) -> RedirectResponse:
+        now_utc = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        orch: OrchestratorClient = app.state.orchestrator_client
+        purged_by = _reviewer_from_request(request)
+
+        ids = review_service.list_trash_document_ids()
+        purgados = 0
+        fallidos = 0
+        for doc_id in ids:
+            try:
+                source_sha256 = review_service.hard_delete_document(
+                    document_id=doc_id,
+                )
+            except Exception:  # noqa: BLE001 - seguir con el resto
+                logger.exception(
+                    "[empty-trash] fallo purgando doc=%s; se continúa",
+                    doc_id,
+                )
+                fallidos += 1
+                continue
+            purgados += 1
+            outcome = orch.notify_document_purged(
+                document_id=doc_id,
+                source_sha256=source_sha256,
+                purged_by=purged_by,
+                purged_at_utc=now_utc,
+            )
+            if outcome is None:
+                logger.warning(
+                    "[empty-trash] no se confirmó la limpieza de dedup "
+                    "doc=%s; el borrado local SÍ se aplicó.",
+                    doc_id,
+                )
+
+        if fallidos:
+            texto = (
+                f"Papelera: {purgados} albarán(es) eliminados; "
+                f"{fallidos} fallaron (reintenta)."
+            )
+        else:
+            texto = f"Papelera vaciada: {purgados} albarán(es) eliminados."
+        message = urlencode({"message": texto})
+        return RedirectResponse(
+            url=f"/documents?vista=papelera&approved=all&{message}",
+            status_code=303,
+        )
 
     @app.post("/documents/{document_id}/purge", include_in_schema=False)
     def purge_from_list(
@@ -1084,6 +1182,25 @@ def build_app(settings: Settings) -> FastAPI:
                 ),
             )
 
+        # 2b) (jul 2026) Guardia: sin líneas leídas del albarán no hay
+        #     nada que valorar. Antes se encolaba igualmente, sv5
+        #     respondía 400, el mensaje quedaba envenenado en la cola
+        #     (reintento eterno cada 10 min) y el front mostraba
+        #     "Valorando..." infinito. sv6 también cierra ya estos
+        #     casos como 'failed' (defensa en profundidad); esta
+        #     guardia evita directamente el viaje inútil.
+        if not getattr(preview, "lines", None):
+            return {
+                "ok": False,
+                "accepted": False,
+                "document_id": document_id,
+                "message": (
+                    "El documento no tiene líneas leídas del albarán: "
+                    "no hay nada que valorar. Revisa la extracción o "
+                    "reprocesa el documento antes de valorar."
+                ),
+            }
+
         # 3) Componer el evento. El selected_at_utc es el INSTANTE del
         #    click, no la fecha del save anterior. Esto sirve como
         #    correlation_key del sv7: dos clicks separados → dos
@@ -1310,6 +1427,70 @@ def build_app(settings: Settings) -> FastAPI:
             "valuation_line_id": new_id,
         }
 
+    # ------------------------------------------------------------------ #
+    # DESHACER (jul 2026, mismo contrato de API que en partes-front):
+    # historial persistente de las ediciones manuales y revertido del
+    # más reciente. El widget flotante de base.html los consume.
+    # ------------------------------------------------------------------ #
+    @app.get("/api/undo/list", include_in_schema=False)
+    def undo_list() -> JSONResponse:
+        try:
+            items = review_service.list_undo(limit=15)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[undo] list falló: %r", exc)
+            items = []
+        return JSONResponse({"items": items})
+
+    @app.post("/api/undo", include_in_schema=False)
+    def undo_apply() -> JSONResponse:
+        try:
+            res = review_service.undo_last()
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("[undo] fallo al deshacer")
+            res = {"ok": False, "error": str(exc)}
+        return JSONResponse(res)
+
+    @app.post("/api/documents/{document_id}/lines/from-contrato")
+    def add_lines_from_contrato_api(
+        document_id: str,
+        payload: dict = Body(...),
+    ) -> dict:
+        # Traer líneas contrato (jul 2026): crea una línea salmón YA
+        # casada (badge Sigrid) por cada línea de contrato seleccionada
+        # en el desplegable multiselección del detalle, prefijada con
+        # partida/descripción/unidad/precio del contrato. La cantidad
+        # queda en blanco para el revisor.
+        raw_ids = payload.get("contrato_line_ids") or []
+        try:
+            ids = [int(x) for x in raw_ids]
+        except (TypeError, ValueError):
+            raise HTTPException(
+                status_code=400,
+                detail="contrato_line_ids debe ser una lista de enteros.",
+            )
+        if not ids:
+            raise HTTPException(
+                status_code=400,
+                detail="Selecciona al menos una línea de contrato.",
+            )
+        creadas = review_service.add_valuation_lines_from_contrato(
+            document_id=document_id,
+            contrato_line_ids=ids,
+        )
+        if creadas == 0:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Ninguna de las líneas seleccionadas pertenece a un "
+                    "contrato de este albarán."
+                ),
+            )
+        return {
+            "ok": True,
+            "document_id": document_id,
+            "created": creadas,
+        }
+
     @app.exception_handler(KeyError)
     async def key_error_handler(_: Request, exc: KeyError) -> JSONResponse:
         return JSONResponse(status_code=404, content={"detail": str(exc)})
@@ -1398,6 +1579,8 @@ def _filters_from_query(
         proveedor=q.get("proveedor"),
         fecha=q.get("fecha"),
         obra=q.get("obra"),
+        obra_codigo=q.get("obra_codigo"),
+        proveedor_cif=q.get("proveedor_cif"),
         albaran=q.get("albaran"),
         contrato=q.get("contrato"),
         lineas=q.get("lineas"),

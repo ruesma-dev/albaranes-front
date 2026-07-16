@@ -1,0 +1,86 @@
+<!-- templates/obras_list.html -->
+{% extends "base.html" %}
+{% block content %}
+<section class="page-header">
+    <div>
+        <p class="page-eyebrow">Construcciones Ruesma · Albaranes</p>
+        <h1>Obras</h1>
+        <p class="muted">Albaranes activos agrupados por obra. Pulsa una obra para abrir su bandeja de albaranes; el detalle de cada albarán es el de siempre.</p>
+    </div>
+    <div class="stats-grid">
+        <div class="stat-card">
+            <span class="stat-label">Obras</span>
+            <strong>{{ items | length }}</strong>
+        </div>
+        <div class="stat-card">
+            <span class="stat-label">Albaranes</span>
+            <strong>{{ items | sum(attribute='total_albaranes') }}</strong>
+        </div>
+        <div class="stat-card">
+            <span class="stat-label">Pendientes</span>
+            <strong>{{ items | sum(attribute='pendientes') }}</strong>
+        </div>
+    </div>
+</section>
+
+<section class="panel table-panel">
+    <form method="get" action="/obras" class="filter-acciones">
+        <input type="text" name="search" value="{{ search }}"
+               placeholder="Buscar por código o nombre de obra…"
+               aria-label="Buscar obra">
+        <button type="submit" class="btn small secondary">Buscar</button>
+        {% if search %}
+            <a href="/obras" class="btn small secondary">Limpiar</a>
+        {% endif %}
+    </form>
+    <div class="table-scroll">
+        <table class="table">
+            <thead>
+            <tr>
+                <th>Obra</th>
+                <th>Nombre</th>
+                <th class="num-cell">Albaranes</th>
+                <th class="num-cell">Pendientes</th>
+                <th class="num-cell">Aprobados</th>
+                <th class="num-cell">Revisión</th>
+                <th class="num-cell">Importe valorado</th>
+                <th>Última fecha</th>
+                <th></th>
+            </tr>
+            </thead>
+            <tbody>
+            {% for item in items %}
+                {% set bandeja_url = '/documents?obra_codigo=' ~ (item.obra_codigo | urlencode) ~ '&approved=all' if item.obra_codigo else None %}
+                <tr>
+                    <td>
+                        {% if bandeja_url %}
+                            <a href="{{ bandeja_url }}"><strong>{{ item.obra_codigo }}</strong></a>
+                        {% else %}
+                            <span class="muted">— sin obra —</span>
+                        {% endif %}
+                    </td>
+                    <td>{{ item.obra_nombre or '—' }}</td>
+                    <td class="num-cell">{{ item.total_albaranes }}</td>
+                    <td class="num-cell">{% if item.pendientes %}<strong>{{ item.pendientes }}</strong>{% else %}0{% endif %}</td>
+                    <td class="num-cell">{{ item.aprobados }}</td>
+                    <td class="num-cell">{{ item.revision_requerida }}</td>
+                    <td class="num-cell">{{ item.importe_valorado | importe_eur }}</td>
+                    <td>{{ item.ultima_fecha | fecha_int_iso }}</td>
+                    <td>
+                        {% if bandeja_url %}
+                            <a href="{{ bandeja_url }}" class="btn small secondary">Ver albaranes →</a>
+                        {% endif %}
+                    </td>
+                </tr>
+            {% else %}
+                <tr>
+                    <td colspan="9" class="muted">
+                        {% if search %}Sin obras que coincidan con «{{ search }}».{% else %}Todavía no hay albaranes.{% endif %}
+                    </td>
+                </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>
+{% endblock %}

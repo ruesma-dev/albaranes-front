@@ -36,10 +36,26 @@
         {% if filters.vista == 'papelera' %}
             <a href="/documents?vista=activos" class="btn small secondary">← Volver a activos</a>
             <span class="muted small">Papelera · {{ result.total }} albarán(es) borrado(s). Puedes restaurarlos.</span>
+            {% if result.total %}
+            {# Vaciar papelera (jul 2026): purga DEFINITIVA de todos los borrados. #}
+            <form method="post" action="/documents/trash/empty" style="display:inline; margin-left:auto;"
+                  onsubmit="return confirm('¿Vaciar la papelera? Se eliminarán DEFINITIVAMENTE {{ result.total }} albarán(es), incluidas sus líneas y valoraciones. Esta acción no se puede deshacer.');">
+                <button type="submit" class="btn small danger">🗑 Vaciar papelera ({{ result.total }})</button>
+            </form>
+            {% endif %}
         {% else %}
             <a href="/documents?vista=papelera&approved=all" class="btn small secondary"><span class="papelera-ico">🗑</span> Papelera{% if result.trash_count %} ({{ result.trash_count }}){% endif %}</a>
         {% endif %}
     </div>
+
+    {# Contexto activo de las vistas Obra/Proveedor (jul 2026). #}
+    {% if filters.obra_codigo or filters.proveedor_cif %}
+        <div class="alert success">
+            {% if filters.obra_codigo %}Mostrando los albaranes de la obra <strong>{{ filters.obra_codigo }}</strong>.{% endif %}
+            {% if filters.proveedor_cif %}Mostrando los albaranes del proveedor <strong>{{ filters.proveedor_cif }}</strong>.{% endif %}
+            <a href="/documents">Quitar filtro</a>
+        </div>
+    {% endif %}
 </section>
 
 <section class="panel table-panel">
@@ -49,6 +65,10 @@
        texto envía; los desplegables envían al cambiar. #}
     <form id="docFilters" method="get">
         <input type="hidden" name="vista" value="{{ filters.vista }}">
+        {# Filtros exactos de las vistas Obra/Proveedor (jul 2026):
+           viajan ocultos para sobrevivir a los filtros de columna. #}
+        {% if filters.obra_codigo %}<input type="hidden" name="obra_codigo" value="{{ filters.obra_codigo }}">{% endif %}
+        {% if filters.proveedor_cif %}<input type="hidden" name="proveedor_cif" value="{{ filters.proveedor_cif }}">{% endif %}
         <input type="hidden" name="sort_by" value="{{ filters.sort_by }}">
         <input type="hidden" name="sort_dir" value="{{ filters.sort_dir }}">
         {# Submit oculto: garantiza que Enter en un campo de texto envíe el

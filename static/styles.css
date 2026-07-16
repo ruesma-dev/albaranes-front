@@ -1636,3 +1636,81 @@ body.col-resizing, body.col-resizing * { cursor: col-resize !important; user-sel
 }
 .btn.brand:hover { background: var(--brand-strong, #7a1e33); }
 .btn.brand:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* Traer líneas contrato (jul 2026): panel multiselección del detalle. */
+.traer-contrato-wrap { position: relative; display: inline-block; }
+.traer-contrato-panel {
+    position: absolute; right: 0; top: calc(100% + 6px); z-index: 60;
+    width: 640px; max-width: 92vw;
+    background: var(--surface, #fff);
+    border: 1px solid var(--border, #d8d4cc);
+    border-radius: 10px;
+    box-shadow: 0 10px 28px rgba(0, 0, 0, .16);
+    padding: 10px;
+}
+.traer-contrato-buscar {
+    width: 100%; box-sizing: border-box; margin-bottom: 8px;
+    padding: 6px 9px; border: 1px solid var(--border, #d8d4cc);
+    border-radius: 7px; font: inherit;
+}
+.traer-contrato-lista {
+    max-height: 300px; overflow-y: auto; overflow-x: hidden;
+    border: 1px solid var(--border, #eee); border-radius: 7px;
+}
+.traer-contrato-item {
+    display: flex; gap: 8px; align-items: flex-start;
+    padding: 6px 9px; cursor: pointer; font-size: .86rem; line-height: 1.3;
+}
+.traer-contrato-item:nth-child(even) { background: rgba(0, 0, 0, .025); }
+.traer-contrato-item:hover { background: rgba(0, 0, 0, .06); }
+/* (jul 2026) El input global lleva width:100% + padding: sin este override
+   el checkbox ocupaba media fila y estrujaba el texto a una columna. */
+.traer-contrato-item input[type="checkbox"] {
+    width: 16px; height: 16px; flex: 0 0 16px;
+    padding: 0; margin: 2px 0 0; accent-color: var(--brand);
+}
+.traer-contrato-item span {
+    flex: 1 1 auto; min-width: 0; white-space: normal;
+    overflow-wrap: anywhere;
+}
+.traer-contrato-vacio { padding: 10px; }
+.traer-contrato-pie {
+    display: flex; justify-content: space-between; align-items: center;
+    margin-top: 8px;
+}
+
+/* ================= DESHACER global (jul 2026, portado de partes) ==== */
+.undo-widget { position: fixed; right: 18px; bottom: 18px; z-index: 150; display: flex; align-items: flex-end; }
+.undo-widget[hidden] { display: none; }
+.undo-btn-main {
+    background: var(--brand); color: #fff; border: none; border-radius: 10px 0 0 10px;
+    padding: 10px 14px; font: inherit; font-weight: 700; cursor: pointer;
+    box-shadow: 0 6px 18px rgba(0, 0, 0, .20); display: flex; align-items: center; gap: 6px;
+}
+.undo-btn-main:hover { background: var(--brand-strong); }
+.undo-btn-main:disabled { opacity: .6; cursor: default; }
+.undo-ico { font-size: 1.1rem; line-height: 1; }
+.undo-toggle {
+    background: var(--brand-strong); color: #fff; border: none; border-radius: 0 10px 10px 0;
+    padding: 10px 9px; cursor: pointer; box-shadow: 0 6px 18px rgba(0, 0, 0, .20);
+    border-left: 1px solid rgba(255, 255, 255, .25); font: inherit;
+}
+.undo-toggle:hover { background: #5e1626; }
+.undo-panel {
+    position: absolute; right: 0; bottom: calc(100% + 8px); width: 380px; max-width: 86vw;
+    max-height: 50vh; overflow-y: auto; background: var(--paper);
+    border: 1px solid var(--line-strong); border-radius: 12px;
+    box-shadow: 0 16px 40px rgba(0, 0, 0, .22); padding: 8px;
+}
+.undo-panel[hidden] { display: none; }
+.undo-panel-head { font-weight: 700; font-size: .8rem; color: var(--steel); padding: 4px 8px 8px; }
+.undo-list { list-style: none; margin: 0; padding: 0; }
+.undo-item { padding: 7px 8px; border-top: 1px solid var(--line); font-size: .84rem; }
+.undo-item:first-child { border-top: none; }
+.undo-next { background: var(--brand-soft); border-radius: 7px; }
+.undo-tag {
+    display: inline-block; font-size: .72rem; font-weight: 700; color: var(--brand);
+    background: #fff; border: 1px solid var(--line-strong); border-radius: 20px;
+    padding: 1px 7px; margin-right: 6px;
+}
+.undo-panel-foot { font-size: .74rem; color: var(--steel); padding: 8px 8px 4px; }

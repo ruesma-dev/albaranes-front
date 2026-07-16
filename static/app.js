@@ -1223,6 +1223,132 @@
     }
 
     // --------------------------------------------------------------- //
+    // Traer líneas contrato (jul 2026): panel multiselección sobre las
+    // líneas del contrato (mismas de #contrato-lines-json que ya usa el
+    // combo de conciliación). Al incorporar, el backend crea una salmón
+    // YA casada (badge Sigrid) por cada seleccionada, con partida,
+    // descripción, unidad y precio del contrato; la cantidad queda en
+    // blanco para el revisor. Recarga al terminar.
+    // --------------------------------------------------------------- //
+    (function wireTraerContrato() {
+        const btn = document.getElementById("traer-contrato-btn");
+        const panel = document.getElementById("traer-contrato-panel");
+        const lista = document.getElementById("traer-contrato-lista");
+        const buscar = document.getElementById("traer-contrato-buscar");
+        const aplicar = document.getElementById("traer-contrato-aplicar");
+        const contador = document.getElementById("traer-contrato-contador");
+        if (!btn || !panel || !lista || !aplicar || !documentId) return;
+
+        let contratoLines = [];
+        try {
+            const raw = document.getElementById("contrato-lines-json");
+            contratoLines = raw ? JSON.parse(raw.textContent || "[]") : [];
+        } catch (_) { contratoLines = []; }
+
+        const seleccion = new Set();
+
+        function pintarContador() {
+            const n = seleccion.size;
+            contador.textContent = n + " seleccionada" + (n === 1 ? "" : "s");
+            aplicar.disabled = n === 0;
+            aplicar.textContent = n ? ("Incorporar (" + n + ")") : "Incorporar";
+        }
+
+        function pintarLista() {
+            const filtro = (buscar && buscar.value ? buscar.value : "")
+                .toLowerCase().trim();
+            lista.innerHTML = "";
+            if (!contratoLines.length) {
+                const p = document.createElement("div");
+                p.className = "muted small traer-contrato-vacio";
+                p.textContent = "El contrato seleccionado no tiene líneas " +
+                    "(elige un contrato arriba y guarda la cabecera).";
+                lista.appendChild(p);
+                return;
+            }
+            let visibles = 0;
+            contratoLines.forEach(function (cl) {
+                const texto = ((cl.part || "") + " " + (cl.desc || ""))
+                    .toLowerCase();
+                if (filtro && texto.indexOf(filtro) === -1) return;
+                visibles += 1;
+                const fila = document.createElement("label");
+                fila.className = "traer-contrato-item";
+                const chk = document.createElement("input");
+                chk.type = "checkbox";
+                chk.checked = seleccion.has(cl.id);
+                chk.addEventListener("change", function () {
+                    if (chk.checked) seleccion.add(cl.id);
+                    else seleccion.delete(cl.id);
+                    pintarContador();
+                });
+                const span = document.createElement("span");
+                span.textContent = cl.label || (cl.part + " · " + cl.desc);
+                fila.appendChild(chk);
+                fila.appendChild(span);
+                lista.appendChild(fila);
+            });
+            if (!visibles) {
+                const p = document.createElement("div");
+                p.className = "muted small traer-contrato-vacio";
+                p.textContent = "Sin coincidencias con el filtro.";
+                lista.appendChild(p);
+            }
+        }
+
+        btn.addEventListener("click", function (ev) {
+            ev.stopPropagation();
+            const abierto = !panel.hidden;
+            panel.hidden = abierto;
+            if (!abierto) {
+                pintarLista();
+                pintarContador();
+                if (buscar) { buscar.value = ""; buscar.focus(); }
+            }
+        });
+        if (buscar) buscar.addEventListener("input", pintarLista);
+        panel.addEventListener("click", function (ev) { ev.stopPropagation(); });
+        document.addEventListener("click", function () { panel.hidden = true; });
+        document.addEventListener("keydown", function (ev) {
+            if (ev.key === "Escape") panel.hidden = true;
+        });
+
+        aplicar.addEventListener("click", async function () {
+            if (!seleccion.size) return;
+            aplicar.disabled = true;
+            try {
+                const resp = await fetch(
+                    `/api/documents/${documentId}/lines/from-contrato`,
+                    {
+                        method: "POST",
+                        headers: {
+                            "Content-Type": "application/json",
+                            "Accept": "application/json",
+                        },
+                        body: JSON.stringify({
+                            contrato_line_ids: Array.from(seleccion),
+                        }),
+                    }
+                );
+                if (!resp.ok) {
+                    let msg = "No se pudieron incorporar las líneas.";
+                    try {
+                        const j = await resp.json();
+                        if (j && j.detail) msg = j.detail;
+                    } catch (_) {}
+                    alert(msg);
+                    aplicar.disabled = false;
+                    return;
+                }
+                window.location.reload();
+            } catch (_) {
+                alert("Error de red al incorporar las líneas del contrato.");
+                aplicar.disabled = false;
+            }
+        });
+    })();
+
+    // --------------------------------------------------------------- //
     // Edicion de lineas (#4/#5/#6): unidad y unitario editables,
     // recalculo importe<->unitario, dirty-tracking y deshacer.
     //
@@ -2854,4 +2980,90 @@
             active.focus();
         }
     });
+})();
+
+// ------------------------------------------------------------------- //
+// DESHACER global (jul 2026, portado de partes-front): pill flotante
+// bottom-right en todas las páginas. Lee el historial del servidor
+// (persiste al cambiar de pantalla) y deshace el último cambio. Ids
+// undo-global-* para no chocar con #undo-btn del detalle (deshacer
+// local de ediciones NO guardadas).
+// ------------------------------------------------------------------- //
+(function wireUndoGlobal() {
+    var widget = document.getElementById("undo-global-widget");
+    if (!widget) return;
+    var btn = document.getElementById("undo-global-btn");
+    var toggle = document.getElementById("undo-global-toggle");
+    var panel = document.getElementById("undo-global-panel");
+    var lista = document.getElementById("undo-global-list");
+    var cnt = document.getElementById("undo-global-count");
+
+    function etiquetaAccion(a) {
+        return ({
+            linea_edit: "Línea",
+            linea_borrar: "Borrar",
+            linea_add: "Añadir",
+            conciliar: "Casar",
+            guardar: "Guardar",
+        })[a] || "Cambio";
+    }
+
+    function refrescar() {
+        fetch("/api/undo/list", { headers: { Accept: "application/json" } })
+            .then(function (r) { return r.json(); })
+            .then(function (data) {
+                var items = (data && data.items) || [];
+                if (!items.length) { widget.hidden = true; return; }
+                widget.hidden = false;
+                if (cnt) cnt.textContent = " (" + items.length + ")";
+                if (!lista) return;
+                lista.innerHTML = "";
+                items.forEach(function (it, i) {
+                    var li = document.createElement("li");
+                    li.className = "undo-item" + (i === 0 ? " undo-next" : "");
+                    var tag = document.createElement("span");
+                    tag.className = "undo-tag";
+                    tag.textContent = etiquetaAccion(it.action);
+                    li.appendChild(tag);
+                    li.appendChild(
+                        document.createTextNode(" " + (it.description || ""))
+                    );
+                    lista.appendChild(li);
+                });
+            })
+            .catch(function () {});
+    }
+
+    if (btn) {
+        btn.addEventListener("click", function () {
+            btn.disabled = true;
+            fetch("/api/undo", {
+                method: "POST",
+                headers: { Accept: "application/json" },
+            })
+                .then(function (r) { return r.json(); })
+                .then(function (res) {
+                    if (res && res.ok) {
+                        window.location.reload(); // refleja lo revertido
+                    } else {
+                        if (res && res.error) alert(res.error);
+                        btn.disabled = false;
+                        refrescar();
+                    }
+                })
+                .catch(function () { btn.disabled = false; });
+        });
+    }
+    if (toggle && panel) {
+        toggle.addEventListener("click", function (ev) {
+            ev.stopPropagation();
+            panel.hidden = !panel.hidden;
+            if (!panel.hidden) refrescar();
+        });
+        document.addEventListener("click", function () {
+            panel.hidden = true;
+        });
+        panel.addEventListener("click", function (ev) { ev.stopPropagation(); });
+    }
+    refrescar();
 })();

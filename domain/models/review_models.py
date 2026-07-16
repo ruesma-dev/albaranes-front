@@ -18,6 +18,12 @@ class DocumentListFilters(BaseModel):
     proveedor: str | None = None
     fecha: str | None = None
     obra: str | None = None
+    # Filtros EXACTOS (jul 2026) para las vistas de Obra y de Proveedor:
+    # a diferencia de ``obra``/``proveedor`` (ILIKE por texto), estos
+    # filtran por igualdad (codigo de obra / CIF normalizado). Viajan
+    # ocultos en el formulario y en la paginacion/ordenacion.
+    obra_codigo: str | None = None
+    proveedor_cif: str | None = None
     albaran: str | None = None
     contrato: str | None = None
     lineas: str | None = None
@@ -610,6 +616,34 @@ class PaginatedDocuments(BaseModel):
     review_required_count: int
     trash_count: int = 0
     importe_pendiente_aprobar: float = 0.0
+
+
+class ObraResumenItem(BaseModel):
+    """Fila de la vista de OBRAS (jul 2026): una obra con sus contadores
+    de albaranes activos y el importe valorado agregado."""
+
+    obra_codigo: str | None = None
+    obra_nombre: str | None = None
+    total_albaranes: int = 0
+    pendientes: int = 0
+    aprobados: int = 0
+    revision_requerida: int = 0
+    importe_valorado: float = 0.0
+    ultima_fecha: str | None = None
+
+
+class ProveedorResumenItem(BaseModel):
+    """Fila de la vista de PROVEEDORES (jul 2026): un proveedor (por CIF
+    normalizado; los sin CIF se agrupan por nombre) con sus contadores."""
+
+    proveedor_cif: str | None = None
+    proveedor_nombre: str | None = None
+    total_albaranes: int = 0
+    pendientes: int = 0
+    aprobados: int = 0
+    revision_requerida: int = 0
+    importe_valorado: float = 0.0
+    ultima_fecha: str | None = None
 
 
 class SaveResponse(BaseModel):

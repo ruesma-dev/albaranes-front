@@ -410,6 +410,26 @@
                         </button>
                     {% endif %}
                     <button type="button" class="btn secondary small" id="add-line-btn" title="Añade una línea salmón suelta (a llevar a Sigrid), en blanco. No toca las líneas blancas leídas por la IA.">Añadir línea</button>
+                    {# Traer líneas contrato (jul 2026): multiselección de líneas
+                       del contrato → una salmón YA casada (badge Sigrid) por cada
+                       una, con partida/descripción/unidad/precio prefijados y la
+                       cantidad en blanco. El JS (wireTraerContrato) monta el panel
+                       con los datos de #contrato-lines-json. #}
+                    <div class="traer-contrato-wrap">
+                        <button type="button" class="btn secondary small" id="traer-contrato-btn"
+                                title="Elige líneas del contrato seleccionado y créalas como salmón ya casadas (Sigrid), con su partida, descripción, unidad y precio. Solo tendrás que poner la cantidad.">
+                            Traer líneas contrato ▾
+                        </button>
+                        <div class="traer-contrato-panel" id="traer-contrato-panel" hidden>
+                            <input type="text" class="traer-contrato-buscar" id="traer-contrato-buscar"
+                                   placeholder="Filtrar por partida o descripción…" autocomplete="off">
+                            <div class="traer-contrato-lista" id="traer-contrato-lista"></div>
+                            <div class="traer-contrato-pie">
+                                <span class="muted small" id="traer-contrato-contador">0 seleccionadas</span>
+                                <button type="button" class="btn success small" id="traer-contrato-aplicar" disabled>Incorporar</button>
+                            </div>
+                        </div>
+                    </div>
                     <button type="button" class="btn success small" id="save-all-lines-btn" title="Guarda de una vez todas las líneas salmón que hayas modificado.">Guardar todas</button>
                 </div>
 
@@ -508,7 +528,7 @@
                             <th data-col="concepto" draggable="true"><span class="th-label">Concepto</span><span class="th-sort"></span><span class="col-resizer"></span></th>
                             <th data-col="cantidad" data-sort-type="num" draggable="true"><span class="th-label">Cantidad</span><span class="th-sort"></span><span class="col-resizer"></span></th>
                             <th data-col="unidad" draggable="true"><span class="th-label">Unidad</span><span class="th-sort"></span><span class="col-resizer"></span></th>
-                            <th data-col="precio" data-sort-type="num" draggable="true"><span class="th-label">Precio unit.</span><span class="th-sub">precio contrato</span><span class="th-sort"></span><span class="col-resizer"></span></th>
+                            <th data-col="precio" data-sort-type="num" draggable="true"><span class="th-label">Precio unit.</span><span class="th-sub">precio aplicado</span><span class="th-sort"></span><span class="col-resizer"></span></th>
                             <th data-col="importe" data-sort-type="num" draggable="true"><span class="th-label">Importe</span><span class="th-sub">cant × precio − dto%</span><span class="th-sort"></span><span class="col-resizer"></span></th>
                             <th data-col="descuento" data-sort-type="num" draggable="true"><span class="th-label">Dto (%)</span><span class="th-sort"></span><span class="col-resizer"></span></th>
                             <th data-col="codigo" draggable="true"><span class="th-label">Cód. externo</span><span class="th-sort"></span><span class="col-resizer"></span></th>

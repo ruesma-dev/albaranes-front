@@ -1,0 +1,100 @@
+<!-- templates/proveedores_list.html -->
+{% extends "base.html" %}
+{% block content %}
+<section class="page-header">
+    <div>
+        <p class="page-eyebrow">Construcciones Ruesma · Albaranes</p>
+        <h1>Proveedores</h1>
+        <p class="muted">Albaranes activos agrupados por proveedor (CIF). Pulsa un proveedor para abrir su bandeja de albaranes; el detalle de cada albarán es el de siempre.</p>
+    </div>
+    <div class="stats-grid">
+        <div class="stat-card">
+            <span class="stat-label">Proveedores</span>
+            <strong>{{ items | length }}</strong>
+        </div>
+        <div class="stat-card">
+            <span class="stat-label">Albaranes</span>
+            <strong>{{ items | sum(attribute='total_albaranes') }}</strong>
+        </div>
+        <div class="stat-card">
+            <span class="stat-label">Pendientes</span>
+            <strong>{{ items | sum(attribute='pendientes') }}</strong>
+        </div>
+    </div>
+</section>
+
+<section class="panel table-panel">
+    <form method="get" action="/proveedores" class="filter-acciones">
+        <input type="text" name="search" value="{{ search }}"
+               placeholder="Buscar por CIF o nombre de proveedor…"
+               aria-label="Buscar proveedor">
+        <button type="submit" class="btn small secondary">Buscar</button>
+        {% if search %}
+            <a href="/proveedores" class="btn small secondary">Limpiar</a>
+        {% endif %}
+    </form>
+    <div class="table-scroll">
+        <table class="table">
+            <thead>
+            <tr>
+                <th>CIF</th>
+                <th>Proveedor</th>
+                <th class="num-cell">Albaranes</th>
+                <th class="num-cell">Pendientes</th>
+                <th class="num-cell">Aprobados</th>
+                <th class="num-cell">Revisión</th>
+                <th class="num-cell">Importe valorado</th>
+                <th>Última fecha</th>
+                <th></th>
+            </tr>
+            </thead>
+            <tbody>
+            {% for item in items %}
+                {# Con CIF -> filtro exacto; sin CIF -> filtro por nombre
+                   (ILIKE) para que la fila siga siendo navegable. #}
+                {% if item.proveedor_cif %}
+                    {% set bandeja_url = '/documents?proveedor_cif=' ~ (item.proveedor_cif | urlencode) ~ '&approved=all' %}
+                {% elif item.proveedor_nombre %}
+                    {% set bandeja_url = '/documents?proveedor=' ~ (item.proveedor_nombre | urlencode) ~ '&approved=all' %}
+                {% else %}
+                    {% set bandeja_url = None %}
+                {% endif %}
+                <tr>
+                    <td>
+                        {% if item.proveedor_cif %}
+                            <a href="{{ bandeja_url }}"><strong>{{ item.proveedor_cif }}</strong></a>
+                        {% else %}
+                            <span class="muted">— sin CIF —</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if bandeja_url %}
+                            <a href="{{ bandeja_url }}">{{ item.proveedor_nombre or '—' }}</a>
+                        {% else %}
+                            {{ item.proveedor_nombre or '—' }}
+                        {% endif %}
+                    </td>
+                    <td class="num-cell">{{ item.total_albaranes }}</td>
+                    <td class="num-cell">{% if item.pendientes %}<strong>{{ item.pendientes }}</strong>{% else %}0{% endif %}</td>
+                    <td class="num-cell">{{ item.aprobados }}</td>
+                    <td class="num-cell">{{ item.revision_requerida }}</td>
+                    <td class="num-cell">{{ item.importe_valorado | importe_eur }}</td>
+                    <td>{{ item.ultima_fecha | fecha_int_iso }}</td>
+                    <td>
+                        {% if bandeja_url %}
+                            <a href="{{ bandeja_url }}" class="btn small secondary">Ver albaranes →</a>
+                        {% endif %}
+                    </td>
+                </tr>
+            {% else %}
+                <tr>
+                    <td colspan="9" class="muted">
+                        {% if search %}Sin proveedores que coincidan con «{{ search }}».{% else %}Todavía no hay albaranes.{% endif %}
+                    </td>
+                </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>
+{% endblock %}

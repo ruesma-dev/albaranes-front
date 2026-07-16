@@ -3,7 +3,10 @@ from __future__ import annotations
 
 from urllib.parse import quote
 
+import json
+import logging
 import math
+import re
 from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urlencode
@@ -34,7 +37,9 @@ from domain.models.review_models import (
     MergeDocumentUpdatePayload,
     MergeLinePayload,
     ObraOption,
+    ObraResumenItem,
     PaginatedDocuments,
+    ProveedorResumenItem,
     ProveedorOption,
     ProviderSnapshot,
     ValuationLineUpdate,
@@ -52,6 +57,8 @@ from infrastructure.database.orm_models import (
 )
 from domain.services.confianza import compute_confianza_pct
 from infrastructure.database.session_factory import SessionFactory
+
+logger = logging.getLogger(__name__)
 
 
 class AlbaranReviewRepository:
@@ -426,6 +433,156 @@ class AlbaranReviewRepository:
             trash_count=int(trash_count),
             importe_pendiente_aprobar=float(importe_pendiente_aprobar or 0.0),
         )
+
+    # ------------------------------------------------------------------ #
+    # Vistas agregadas: Obras y Proveedores (jul 2026)
+    # ------------------------------------------------------------------ #
+    def list_obras_resumen(
+        self, *, search: str | None = None,
+    ) -> list[ObraResumenItem]:
+        """Resumen de albaranes ACTIVOS agrupados por obra.
+
+        Una fila por ``obra_codigo`` (los sin obra se agrupan bajo la
+        fila con codigo NULL) con contadores de estado, el importe
+        valorado agregado (ultima valoracion por documento, mismo
+        criterio DISTINCT-por-documento que la bandeja) y la fecha de
+        albaran mas reciente. Best-effort: ante error devuelve [].
+        """
+        self.initialize()
+        if not self._tables_ready():
+            return []
+        sql = (
+            "SELECT d.obra_codigo AS obra_codigo, "
+            "       MAX(NULLIF(d.obra_nombre, '')) AS obra_nombre, "
+            "       COUNT(*) AS total_albaranes, "
+            "       COUNT(*) FILTER (WHERE d.approved = FALSE) "
+            "           AS pendientes, "
+            "       COUNT(*) FILTER (WHERE d.approved = TRUE) "
+            "           AS aprobados, "
+            "       COUNT(*) FILTER (WHERE d.review_required = TRUE) "
+            "           AS revision_requerida, "
+            "       COALESCE(SUM(v.total_valorado), 0) AS importe_valorado, "
+            "       MAX(d.fecha) AS ultima_fecha "
+            "FROM albaran_documents_merge d "
+            "LEFT JOIN LATERAL ("
+            "    SELECT av.total_valorado "
+            "    FROM albaran_valuations av "
+            "    WHERE av.document_id = d.id "
+            "    ORDER BY av.id DESC "
+            "    LIMIT 1"
+            ") v ON TRUE "
+            "WHERE d.is_active = TRUE "
+        )
+        params: dict[str, Any] = {}
+        if search and search.strip():
+            sql += (
+                "AND (d.obra_codigo ILIKE :term "
+                "     OR d.obra_nombre ILIKE :term) "
+            )
+            params["term"] = f"%{search.strip()}%"
+        sql += (
+            "GROUP BY d.obra_codigo "
+            "ORDER BY pendientes DESC, total_albaranes DESC, "
+            "         obra_codigo ASC NULLS LAST"
+        )
+        try:
+            with self._session_factory.create_session() as session:
+                rows = session.execute(text(sql), params).mappings().all()
+        except Exception:
+            logger.exception("[obras-resumen] consulta fallo; se devuelve [].")
+            return []
+        return [
+            ObraResumenItem(
+                obra_codigo=r["obra_codigo"],
+                obra_nombre=r["obra_nombre"],
+                total_albaranes=int(r["total_albaranes"] or 0),
+                pendientes=int(r["pendientes"] or 0),
+                aprobados=int(r["aprobados"] or 0),
+                revision_requerida=int(r["revision_requerida"] or 0),
+                importe_valorado=float(r["importe_valorado"] or 0.0),
+                ultima_fecha=(
+                    str(r["ultima_fecha"]) if r["ultima_fecha"] else None
+                ),
+            )
+            for r in rows
+        ]
+
+    def list_proveedores_resumen(
+        self, *, search: str | None = None,
+    ) -> list[ProveedorResumenItem]:
+        """Resumen de albaranes ACTIVOS agrupados por proveedor.
+
+        Se agrupa por CIF NORMALIZADO (mayusculas, sin espacios) para que
+        variantes tipo "B 123" y "B123" caigan juntas; los documentos SIN
+        CIF se agrupan por nombre (en minusculas) para no mezclarlos.
+        Best-effort: ante error devuelve [].
+        """
+        self.initialize()
+        if not self._tables_ready():
+            return []
+        sql = (
+            "SELECT NULLIF(MAX(UPPER(REPLACE("
+            "           TRIM(COALESCE(d.proveedor_cif, '')), ' ', ''))), '') "
+            "           AS proveedor_cif, "
+            "       MAX(NULLIF(d.proveedor_nombre, '')) AS proveedor_nombre, "
+            "       COUNT(*) AS total_albaranes, "
+            "       COUNT(*) FILTER (WHERE d.approved = FALSE) "
+            "           AS pendientes, "
+            "       COUNT(*) FILTER (WHERE d.approved = TRUE) "
+            "           AS aprobados, "
+            "       COUNT(*) FILTER (WHERE d.review_required = TRUE) "
+            "           AS revision_requerida, "
+            "       COALESCE(SUM(v.total_valorado), 0) AS importe_valorado, "
+            "       MAX(d.fecha) AS ultima_fecha "
+            "FROM albaran_documents_merge d "
+            "LEFT JOIN LATERAL ("
+            "    SELECT av.total_valorado "
+            "    FROM albaran_valuations av "
+            "    WHERE av.document_id = d.id "
+            "    ORDER BY av.id DESC "
+            "    LIMIT 1"
+            ") v ON TRUE "
+            "WHERE d.is_active = TRUE "
+        )
+        params: dict[str, Any] = {}
+        if search and search.strip():
+            sql += (
+                "AND (d.proveedor_cif ILIKE :term "
+                "     OR d.proveedor_nombre ILIKE :term) "
+            )
+            params["term"] = f"%{search.strip()}%"
+        sql += (
+            "GROUP BY COALESCE("
+            "    NULLIF(UPPER(REPLACE("
+            "        TRIM(COALESCE(d.proveedor_cif, '')), ' ', '')), ''), "
+            "    'sin-cif::' || LOWER(COALESCE(d.proveedor_nombre, ''))"
+            ") "
+            "ORDER BY pendientes DESC, total_albaranes DESC, "
+            "         proveedor_nombre ASC"
+        )
+        try:
+            with self._session_factory.create_session() as session:
+                rows = session.execute(text(sql), params).mappings().all()
+        except Exception:
+            logger.exception(
+                "[proveedores-resumen] consulta fallo; se devuelve []."
+            )
+            return []
+        return [
+            ProveedorResumenItem(
+                proveedor_cif=r["proveedor_cif"],
+                proveedor_nombre=r["proveedor_nombre"],
+                total_albaranes=int(r["total_albaranes"] or 0),
+                pendientes=int(r["pendientes"] or 0),
+                aprobados=int(r["aprobados"] or 0),
+                revision_requerida=int(r["revision_requerida"] or 0),
+                importe_valorado=float(r["importe_valorado"] or 0.0),
+                ultima_fecha=(
+                    str(r["ultima_fecha"]) if r["ultima_fecha"] else None
+                ),
+            )
+            for r in rows
+        ]
 
     def _compute_and_persist_confianza(
         self,
@@ -2060,6 +2217,466 @@ class AlbaranReviewRepository:
             session.commit()
             return int(new_id)
 
+    # ------------------------------------------------------------------ #
+    # Traer líneas de contrato (jul 2026): crea líneas salmón YA casadas.
+    # ------------------------------------------------------------------ #
+    def add_valuation_lines_from_contrato(
+        self,
+        *,
+        document_id: str,
+        contrato_line_ids: list[int],
+    ) -> list[int]:
+        """Crea UNA línea salmón por cada línea de contrato seleccionada,
+        ya enganchada a ella (``matched_contrato_line_id`` → badge Sigrid)
+        y prefijada con su partida, descripción, unidad y precio unitario.
+        La cantidad queda en blanco para que el revisor la rellene (el
+        importe se recalcula al guardar, como en el resto de salmón).
+
+        Mismos literales que ``set_line_conciliacion`` modo
+        'contract_line' (``manual_contract``/'manual') y misma creación
+        de cabecera que ``add_standalone_valuation_line``.
+
+        Solo admite líneas de contratos DEL PROPIO documento (defensa
+        ante ids arbitrarios). Devuelve los ids de las líneas de
+        valoración creadas (jul 2026: lista en vez de contador, para que
+        el historial de deshacer pueda borrarlas).
+        """
+        import uuid
+
+        ids = [int(i) for i in (contrato_line_ids or []) if i is not None]
+        if not ids:
+            return []
+
+        self.initialize()
+        with self._session_factory.create_session() as session:
+            doc = session.execute(
+                text(
+                    "SELECT id FROM albaran_documents_merge WHERE id = :id"
+                ),
+                {"id": document_id},
+            ).first()
+            if doc is None:
+                raise KeyError(f"Documento no encontrado: {document_id}")
+
+            # Líneas de contrato válidas: deben colgar de un contrato de
+            # ESTE documento. Se conserva el orden de selección.
+            rows = session.execute(
+                text(
+                    "SELECT l.id, l.codigo_partida, l.descripcion_linea, "
+                    "       l.precio_unitario, l.unidad_medida "
+                    "FROM albaran_contrato_lines_merge l "
+                    "WHERE l.id = ANY(:ids) "
+                    "  AND l.contrato_id IN ("
+                    "    SELECT id FROM albaran_contratos_merge "
+                    "    WHERE document_id = :doc)"
+                ),
+                {"ids": ids, "doc": document_id},
+            ).mappings().all()
+            por_id = {int(r["id"]): r for r in rows}
+
+            now = self._utc_iso()
+            hdr = session.execute(
+                text(
+                    "SELECT id FROM albaran_valuations "
+                    "WHERE document_id = :doc"
+                ),
+                {"doc": document_id},
+            ).mappings().first()
+            if hdr is None:
+                valuation_id = str(uuid.uuid4())
+                session.execute(
+                    text(
+                        "INSERT INTO albaran_valuations "
+                        "  (id, document_id, status, created_at_utc) "
+                        "VALUES (:id, :doc, 'manual', :now)"
+                    ),
+                    {"id": valuation_id, "doc": document_id, "now": now},
+                )
+            else:
+                valuation_id = hdr["id"]
+
+            creadas: list[int] = []
+            for cid in ids:
+                cl = por_id.get(cid)
+                if cl is None:
+                    logger.warning(
+                        "[from-contrato] línea de contrato %s no pertenece "
+                        "al documento %s; ignorada",
+                        cid, document_id,
+                    )
+                    continue
+                nuevo_id = session.execute(
+                    text(
+                        "INSERT INTO albaran_line_valuations ("
+                        "  valuation_id, merge_line_id, "
+                        "  matched_contrato_line_id, "
+                        "  derived_contrato_line_id, "
+                        "  precio_unitario_contrato_db, precio_unitario_final, "
+                        "  precio_unitario_source, precio_unitario_agreement, "
+                        "  unidad_albaran, unidad_contrato, unidad_categoria, "
+                        "  unidad_category_match, cantidad_albaran, "
+                        "  cantidad_convertida, factor_conversion, "
+                        "  importe_calculado, importe_source, "
+                        "  codigo_partida_albaran, codigo_partida_final, "
+                        "  partida_action, descripcion_linea, line_kind, "
+                        "  match_confidence_pct, match_method, "
+                        "  review_required, created_at_utc) "
+                        "VALUES ("
+                        "  :v, NULL, :cid, NULL, :precio, :precio, "
+                        "  'manual_contract', 'manual', NULL, :unidad, "
+                        "  'manual', TRUE, NULL, NULL, 1.0, NULL, "
+                        "  'calculated', NULL, :partida, 'manual', "
+                        "  :descr, 'manual', 100.0, 'manual', FALSE, :now) "
+                        "RETURNING id"
+                    ),
+                    {
+                        "v": valuation_id,
+                        "cid": cid,
+                        "precio": cl["precio_unitario"],
+                        "unidad": cl["unidad_medida"],
+                        "partida": cl["codigo_partida"],
+                        "descr": cl["descripcion_linea"],
+                        "now": now,
+                    },
+                ).scalar_one()
+                creadas.append(int(nuevo_id))
+
+            if creadas:
+                session.execute(
+                    text(
+                        "UPDATE albaran_valuations SET updated_at_utc = :now "
+                        "WHERE id = :v"
+                    ),
+                    {"v": valuation_id, "now": now},
+                )
+            session.commit()
+            return creadas
+
+    # ------------------------------------------------------------------ #
+    # Vaciar papelera (jul 2026): ids de los borrados, para purgarlos
+    # uno a uno reutilizando hard_delete_document (y su limpieza de
+    # dedup vía orquestador, que gestiona la ruta web por documento).
+    # ------------------------------------------------------------------ #
+    def list_trash_document_ids(self) -> list[str]:
+        self.initialize()
+        with self._session_factory.create_session() as session:
+            rows = session.execute(
+                text(
+                    "SELECT id FROM albaran_documents_merge "
+                    "WHERE is_active = FALSE "
+                    "ORDER BY deleted_at_utc NULLS LAST, id"
+                )
+            ).all()
+            return [str(r[0]) for r in rows]
+
+    # ------------------------------------------------------------------ #
+    # DESHACER (jul 2026, patrón portado de partes-front)
+    #
+    # Historial persistente en ``undo_log`` (misma forma que en partes:
+    # id/created_at_utc/action/description/payload/undone/actor). El
+    # payload guarda snapshots del estado ANTERIOR:
+    #   - restore:        filas a RESTAURAR (UPDATE de todas sus columnas)
+    #   - reinsert:       filas que la acción BORRÓ (INSERT de vuelta)
+    #   - delete_created: filas que la acción CREÓ (DELETE al deshacer)
+    #
+    # A diferencia de partes (que registra dentro de la sesión mutadora),
+    # aquí los snapshots se toman ANTES y el registro DESPUÉS de la
+    # mutación, desde el servicio (review_service): así no se toca la
+    # lógica interna de los métodos mutadores. No es atómico con la
+    # mutación: si el registro falla, la acción queda hecha sin entrada
+    # de deshacer (aceptable para una herramienta monousuario).
+    #
+    # Solo se tocan tablas de la whitelist y con identificadores
+    # validados, para que un payload corrupto no pueda inyectar SQL.
+    # ------------------------------------------------------------------ #
+    _UNDO_TABLES: frozenset = frozenset({
+        "albaran_line_valuations",
+        "albaran_valuations",
+        "albaran_documents_merge",
+        "contrato_lines_derived",
+    })
+    _UNDO_IDENT_RE = re.compile(r"^[a-z_][a-z0-9_]*$")
+    _UNDO_LIMIT = 15
+
+    def _ensure_undo_table(self, session: Any) -> None:
+        if getattr(self, "_undo_table_ready", False):
+            return
+        session.execute(text(
+            "CREATE TABLE IF NOT EXISTS undo_log ("
+            "  id SERIAL PRIMARY KEY,"
+            "  created_at_utc VARCHAR(40) NOT NULL,"
+            "  action VARCHAR(40) NOT NULL,"
+            "  description TEXT NOT NULL,"
+            "  payload TEXT NOT NULL,"
+            "  undone BOOLEAN NOT NULL DEFAULT false,"
+            "  actor VARCHAR(120)"
+            ")"
+        ))
+        self._undo_table_ready = True
+
+    def snapshot_row(self, *, table: str, row_id: Any) -> dict | None:
+        """Copia completa de una fila (estado ANTERIOR) para el historial.
+        Devuelve None si la fila no existe o la tabla no está permitida."""
+        if table not in self._UNDO_TABLES:
+            return None
+        self.initialize()
+        with self._session_factory.create_session() as session:
+            row = session.execute(
+                text(f"SELECT * FROM {table} WHERE id = :id"),  # noqa: S608
+                {"id": row_id},
+            ).mappings().first()
+            if row is None:
+                return None
+            return {"table": table, "values": dict(row)}
+
+    def record_undo(
+        self,
+        *,
+        action: str,
+        description: str,
+        restore: list[dict] | None = None,
+        reinsert: list[dict] | None = None,
+        delete_created: list[dict] | None = None,
+        actor: str | None = None,
+    ) -> None:
+        """Inserta una entrada de historial (best-effort: nunca revienta
+        la operación principal)."""
+        try:
+            payload = {
+                "restore": [s for s in (restore or []) if s],
+                "reinsert": [s for s in (reinsert or []) if s],
+                "delete_created": list(delete_created or []),
+            }
+            if not any(payload.values()):
+                return
+            self.initialize()
+            with self._session_factory.create_session() as session:
+                self._ensure_undo_table(session)
+                session.execute(
+                    text(
+                        "INSERT INTO undo_log "
+                        "  (created_at_utc, action, description, payload, "
+                        "   undone, actor) "
+                        "VALUES (:now, :action, :descr, :payload, FALSE, "
+                        "        :actor)"
+                    ),
+                    {
+                        "now": self._utc_iso(),
+                        "action": action,
+                        "descr": description,
+                        "payload": json.dumps(payload, default=str),
+                        "actor": actor,
+                    },
+                )
+                session.commit()
+        except Exception:  # noqa: BLE001 - best-effort
+            logger.exception("[undo] no se pudo registrar '%s'", description)
+
+    def list_undo(self, *, limit: int = _UNDO_LIMIT) -> list[dict]:
+        self.initialize()
+        try:
+            with self._session_factory.create_session() as session:
+                self._ensure_undo_table(session)
+                session.commit()
+                rows = session.execute(
+                    text(
+                        "SELECT id, action, description, created_at_utc "
+                        "FROM undo_log WHERE undone = FALSE "
+                        "ORDER BY id DESC LIMIT :lim"
+                    ),
+                    {"lim": int(limit)},
+                ).mappings().all()
+                return [
+                    {
+                        "id": r["id"],
+                        "action": r["action"],
+                        "description": r["description"],
+                        "created_at": r["created_at_utc"],
+                    }
+                    for r in rows
+                ]
+        except Exception:  # noqa: BLE001
+            logger.exception("[undo] list falló")
+            return []
+
+    def undo_last(self) -> dict:
+        """Deshace la entrada no-deshecha más reciente: borra lo creado,
+        reinserta lo borrado y restaura lo modificado. La marca undone."""
+        self.initialize()
+        with self._session_factory.create_session() as session:
+            self._ensure_undo_table(session)
+            row = session.execute(
+                text(
+                    "SELECT id, description, payload FROM undo_log "
+                    "WHERE undone = FALSE ORDER BY id DESC LIMIT 1 "
+                    "FOR UPDATE"
+                )
+            ).mappings().first()
+            if row is None:
+                return {"ok": False, "error": "No hay nada que deshacer."}
+            try:
+                payload = json.loads(row["payload"])
+            except Exception:  # noqa: BLE001
+                payload = {}
+
+            try:
+                # 1) Borrar lo CREADO por la acción.
+                for item in payload.get("delete_created", []):
+                    tabla = item.get("table")
+                    if tabla not in self._UNDO_TABLES:
+                        continue
+                    session.execute(
+                        text(f"DELETE FROM {tabla} WHERE id = :id"),  # noqa: S608
+                        {"id": item.get("id")},
+                    )
+                # 2) Reinsertar lo BORRADO (si ya existe, se ignora).
+                for snap in payload.get("reinsert", []):
+                    self._undo_apply_reinsert(session, snap)
+                # 3) Restaurar lo MODIFICADO.
+                for snap in payload.get("restore", []):
+                    self._undo_apply_restore(session, snap)
+                session.execute(
+                    text("UPDATE undo_log SET undone = TRUE WHERE id = :id"),
+                    {"id": row["id"]},
+                )
+                session.commit()
+            except Exception as exc:  # noqa: BLE001
+                session.rollback()
+                logger.exception("[undo] fallo aplicando id=%s", row["id"])
+                return {"ok": False, "error": f"No se pudo deshacer: {exc}"}
+
+            remaining = session.execute(
+                text("SELECT COUNT(*) FROM undo_log WHERE undone = FALSE")
+            ).scalar_one()
+        return {
+            "ok": True,
+            "description": row["description"],
+            "remaining": int(remaining),
+        }
+
+    def _undo_cols_ok(self, values: dict) -> dict:
+        return {
+            k: v for k, v in (values or {}).items()
+            if self._UNDO_IDENT_RE.match(str(k))
+        }
+
+    def _undo_apply_restore(self, session: Any, snap: dict) -> None:
+        tabla = snap.get("table")
+        values = self._undo_cols_ok(snap.get("values") or {})
+        if tabla not in self._UNDO_TABLES or "id" not in values:
+            return
+        sets = ", ".join(
+            f"{col} = :{col}" for col in values.keys() if col != "id"
+        )
+        if not sets:
+            return
+        session.execute(
+            text(f"UPDATE {tabla} SET {sets} WHERE id = :id"),  # noqa: S608
+            values,
+        )
+
+    def _undo_apply_reinsert(self, session: Any, snap: dict) -> None:
+        tabla = snap.get("table")
+        values = self._undo_cols_ok(snap.get("values") or {})
+        if tabla not in self._UNDO_TABLES or "id" not in values:
+            return
+        existe = session.execute(
+            text(f"SELECT 1 FROM {tabla} WHERE id = :id"),  # noqa: S608
+            {"id": values["id"]},
+        ).first()
+        if existe:
+            return
+        cols = ", ".join(values.keys())
+        marks = ", ".join(f":{c}" for c in values.keys())
+        session.execute(
+            text(f"INSERT INTO {tabla} ({cols}) VALUES ({marks})"),  # noqa: S608
+            values,
+        )
+        # Realinear la secuencia del SERIAL para que futuros INSERT no
+        # choquen con el id reinsertado. pg_get_serial_sequence devuelve
+        # NULL (sin error) si el id no es SERIAL (p. ej. uuid): se omite.
+        seq = session.execute(
+            text("SELECT pg_get_serial_sequence(:t, 'id')"),
+            {"t": tabla},
+        ).scalar()
+        if seq:
+            session.execute(
+                text(
+                    "SELECT setval(:s, "
+                    "  (SELECT COALESCE(MAX(id), 1) FROM " + tabla + "), "
+                    "  true)"
+                ),
+                {"s": seq},
+            )
+
+    def doc_label(self, *, document_id: str) -> str:
+        """Etiqueta corta para las descripciones del historial."""
+        try:
+            self.initialize()
+            with self._session_factory.create_session() as session:
+                num = session.execute(
+                    text(
+                        "SELECT numero_albaran FROM albaran_documents_merge "
+                        "WHERE id = :id"
+                    ),
+                    {"id": document_id},
+                ).scalar()
+            return f"alb {num}" if num else f"alb {document_id[:8]}"
+        except Exception:  # noqa: BLE001
+            return f"alb {document_id[:8]}"
+
+    def valuation_header_id(self, *, document_id: str) -> str | None:
+        try:
+            self.initialize()
+            with self._session_factory.create_session() as session:
+                return session.execute(
+                    text(
+                        "SELECT id FROM albaran_valuations "
+                        "WHERE document_id = :doc"
+                    ),
+                    {"doc": document_id},
+                ).scalar()
+        except Exception:  # noqa: BLE001
+            return None
+
+    def line_brief(self, *, valuation_line_id: int) -> dict | None:
+        """Partida/descr/derivada de una línea, para descripciones y
+        snapshots del historial."""
+        try:
+            self.initialize()
+            with self._session_factory.create_session() as session:
+                r = session.execute(
+                    text(
+                        "SELECT id, codigo_partida_final, descripcion_linea, "
+                        "       derived_contrato_line_id, valuation_id "
+                        "FROM albaran_line_valuations WHERE id = :id"
+                    ),
+                    {"id": valuation_line_id},
+                ).mappings().first()
+                return dict(r) if r else None
+        except Exception:  # noqa: BLE001
+            return None
+
+    def latest_valuation_line_for_merge(
+        self, *, merge_line_id: int
+    ) -> dict | None:
+        """La línea de valoración más reciente de una línea blanca (para
+        capturar la recién creada por add_conciliacion_for_merge_line)."""
+        try:
+            self.initialize()
+            with self._session_factory.create_session() as session:
+                r = session.execute(
+                    text(
+                        "SELECT id, derived_contrato_line_id "
+                        "FROM albaran_line_valuations "
+                        "WHERE merge_line_id = :m ORDER BY id DESC LIMIT 1"
+                    ),
+                    {"m": merge_line_id},
+                ).mappings().first()
+                return dict(r) if r else None
+        except Exception:  # noqa: BLE001
+            return None
+
 
     def _build_merge_detail(
         self,
@@ -3467,6 +4084,28 @@ class AlbaranReviewRepository:
                     AlbaranDocumentMergeOrm.obra_codigo.ilike(term),
                     AlbaranDocumentMergeOrm.obra_nombre.ilike(term),
                 )
+            )
+        # ---- Filtros EXACTOS de las vistas Obra/Proveedor (jul 2026) ----
+        if filters.obra_codigo:
+            stmt = stmt.where(
+                AlbaranDocumentMergeOrm.obra_codigo
+                == filters.obra_codigo.strip()
+            )
+        if filters.proveedor_cif:
+            cif_norm = (
+                filters.proveedor_cif.strip().upper().replace(" ", "")
+            )
+            stmt = stmt.where(
+                func.upper(
+                    func.replace(
+                        func.coalesce(
+                            AlbaranDocumentMergeOrm.proveedor_cif, ""
+                        ),
+                        " ",
+                        "",
+                    )
+                )
+                == cif_norm
             )
         if filters.albaran:
             stmt = stmt.where(

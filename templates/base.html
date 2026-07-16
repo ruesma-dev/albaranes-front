@@ -38,6 +38,8 @@
         </a>
         <nav class="topnav">
             <a href="/documents">Bandeja</a>
+            <a href="/obras">Obras</a>
+            <a href="/proveedores">Proveedores</a>
             <a href="/health" target="_blank" rel="noreferrer">Health</a>
             <a class="topnav__portal"
                href="https://portal.ruesma.es"
@@ -60,6 +62,21 @@
     <span class="footer__dot" aria-hidden="true">·</span>
     <span>Acceso interno</span>
 </footer>
+
+{# DESHACER global (jul 2026, portado de partes-front): pill flotante con
+   historial de las ediciones manuales. Ids undo-global-* para no chocar
+   con el #undo-btn del detalle (deshacer local de cambios NO guardados). #}
+<div id="undo-global-widget" class="undo-widget" hidden>
+    <button type="button" id="undo-global-btn" class="undo-btn-main" title="Deshacer la última acción">
+        <span class="undo-ico">↶</span> Deshacer<span class="undo-count" id="undo-global-count"></span>
+    </button>
+    <button type="button" id="undo-global-toggle" class="undo-toggle" title="Ver cambios recientes">▾</button>
+    <div class="undo-panel" id="undo-global-panel" hidden>
+        <div class="undo-panel-head">Cambios recientes (lo más nuevo primero)</div>
+        <ul class="undo-list" id="undo-global-list"></ul>
+        <div class="undo-panel-foot">Pulsa "Deshacer" para revertir el más reciente. Puedes repetir.</div>
+    </div>
+</div>
 
 <script src="{{ request.url_for('static', path='app.js') }}?v={{ asset_version|default('1') }}"></script>
 {% block scripts %}{% endblock %}
